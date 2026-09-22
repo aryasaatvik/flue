@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,4 +27,5 @@ console.log('Dry run: proposed Scratchpad upload set');
 for (const artifact of manifest.artifacts) {
 	console.log(`${artifact.path} sha256=${artifact.sha256}`);
 }
-console.log(`${manifestPath} sha256=metadata`);
+const manifestSha256 = createHash('sha256').update(readFileSync(manifestPath)).digest('hex');
+console.log(`${manifestPath} sha256=${manifestSha256}`);
