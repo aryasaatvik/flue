@@ -40,17 +40,18 @@ function parsePackOutput(output) {
 
 function rewriteLocalVersions(manifest, version) {
 	const rewritten = { ...manifest, version };
-	for (const field of [
-		'dependencies',
-		'devDependencies',
-		'peerDependencies',
-		'optionalDependencies',
-	]) {
+	for (const field of ['devDependencies', 'peerDependencies', 'optionalDependencies']) {
 		if (!rewritten[field]) continue;
 		rewritten[field] = { ...rewritten[field] };
 		for (const dependency of packageNames) {
 			if (dependency in rewritten[field]) rewritten[field][dependency] = version;
 		}
+	}
+	for (const dependency of packageNames) {
+		if (!(dependency in (rewritten.dependencies ?? {}))) continue;
+		rewritten.dependencies = { ...rewritten.dependencies };
+		delete rewritten.dependencies[dependency];
+		rewritten.peerDependencies = { ...rewritten.peerDependencies, [dependency]: version };
 	}
 	return rewritten;
 }
@@ -98,7 +99,6 @@ function verifyFreshConsumer(artifacts, version) {
 						['react', '^19.1.1'],
 						['vite', '^8.1.2'],
 					]),
-					overrides: artifactReferences,
 				},
 				null,
 				2,
