@@ -12,6 +12,7 @@
 		"dev": "turbo dev",
 		"build": "turbo build",
 		"build:docs": "node scripts/build-docs.mjs",
+		"checkpoint:integration": "node scripts/integration-checkpoint.mjs",
 		"changeset": "changeset",
 		"release": "pnpm run build && pnpm run build:docs && changeset publish",
 		"test": "turbo test",
@@ -23,7 +24,8 @@
 		"check:types": "turbo run check:types --filter=!apps-www",
 		"format": "turbo run format:lint format:style",
 		"format:lint": "biome check . --write",
-		"format:style": "prettier . --cache --write --list-different"
+		"format:style": "prettier . --cache --write --list-different",
+		"pack:integration": "node scripts/integration-pack.mjs"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.2.0",

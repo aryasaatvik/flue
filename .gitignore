@@ -50,6 +50,9 @@ worker-configuration.d.ts
 data/
 
 # Docker build artifacts (machine-specific CA certs for TLS proxy)
+
+# Samva integration package artifacts
+/artifacts/
 corporate-ca.pem
 
 # legacy code (kept locally for reference, not pushed)
