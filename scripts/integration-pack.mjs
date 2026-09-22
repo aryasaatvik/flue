@@ -197,6 +197,7 @@ function main() {
 		version,
 		packageManager: 'pnpm@11.1.1',
 		consumerRuntime: 'bun',
+		verification: { freshConsumer: true },
 		artifacts,
 	};
 	writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
