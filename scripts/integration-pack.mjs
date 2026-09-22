@@ -39,19 +39,21 @@ function parsePackOutput(output) {
 }
 
 function rewriteLocalVersions(manifest, version) {
-	const rewritten = { ...manifest, version };
+	const rewritten = { ...manifest, version, samvaIntegrationPackageSet: version };
 	for (const field of ['devDependencies', 'peerDependencies', 'optionalDependencies']) {
 		if (!rewritten[field]) continue;
 		rewritten[field] = { ...rewritten[field] };
 		for (const dependency of packageNames) {
-			if (dependency in rewritten[field]) rewritten[field][dependency] = version;
+			if (dependency in rewritten[field]) {
+				rewritten[field][dependency] = field === 'peerDependencies' ? '*' : version;
+			}
 		}
 	}
 	for (const dependency of packageNames) {
 		if (!(dependency in (rewritten.dependencies ?? {}))) continue;
 		rewritten.dependencies = { ...rewritten.dependencies };
 		delete rewritten.dependencies[dependency];
-		rewritten.peerDependencies = { ...rewritten.peerDependencies, [dependency]: version };
+		rewritten.peerDependencies = { ...rewritten.peerDependencies, [dependency]: '*' };
 	}
 	return rewritten;
 }
@@ -121,7 +123,11 @@ function verifyFreshConsumer(artifacts, version) {
 		);
 		for (const name of packageNames) {
 			const matches = installed.filter(({ value }) => value.name === name);
-			if (matches.length !== 1 || matches[0].value.version !== version) {
+			if (
+				matches.length !== 1 ||
+				matches[0].value.version !== version ||
+				matches[0].value.samvaIntegrationPackageSet !== version
+			) {
 				throw new Error(
 					`Fresh consumer resolved ${name} ${matches.length} time(s): ${matches.map(({ value }) => value.version).join(', ')}`,
 				);
