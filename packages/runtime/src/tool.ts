@@ -237,11 +237,10 @@ const TOOL_RUN_ENVELOPE_FIELDS = new Set(['output', 'content', 'terminate']);
 
 /**
  * One image may use at most 14 MiB of base64 text (about 10.5 MiB decoded),
- * matching Flue's existing prompt-image ceiling. Four images and 20 MiB total
- * bound array overhead and decoded-plus-base64 residency on 128 MiB Workers
- * while leaving room for a full-page screenshot plus supporting crops.
+ * matching Flue's existing prompt-image ceiling. The 20 MiB total bounds
+ * decoded-plus-base64 residency on 128 MiB Workers while allowing any number
+ * of images that fit that byte budget.
  */
-export const MAX_TOOL_RESULT_IMAGES = 4;
 export const MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH = 14 * 1024 * 1024;
 export const MAX_TOOL_RESULT_IMAGE_TOTAL_BASE64_LENGTH = 20 * 1024 * 1024;
 
@@ -334,7 +333,6 @@ function validateToolResultContent(toolName: string, value: unknown): ToolResult
 			`[flue] Tool "${toolName}" content must be a non-empty array of text/image blocks.`,
 		);
 	}
-	let imageCount = 0;
 	let totalImageDataLength = 0;
 	return value.map((block, index) => {
 		if (!isPlainObject(block)) {
@@ -369,12 +367,6 @@ function validateToolResultContent(toolName: string, value: unknown): ToolResult
 		if (typeof block.data !== 'string') {
 			throw new Error(
 				`[flue] Tool "${toolName}" content[${index}].data must be non-empty RFC 4648 base64 without a data URL prefix.`,
-			);
-		}
-		imageCount++;
-		if (imageCount > MAX_TOOL_RESULT_IMAGES) {
-			throw new Error(
-				`[flue] Tool "${toolName}" content exceeds the ${MAX_TOOL_RESULT_IMAGES}-image limit.`,
 			);
 		}
 		if (block.data.length > MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH) {

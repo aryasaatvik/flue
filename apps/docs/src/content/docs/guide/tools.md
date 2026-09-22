@@ -64,7 +64,7 @@ return {
 };
 ```
 
-Image `data` is raw RFC 4648 base64 without a `data:` prefix. Accepted MIME types are PNG, JPEG, GIF, and WebP. A result may contain at most 4 images, each at most 14 MiB of base64 text, and at most 20 MiB of base64 image data in total. Invalid or oversized content becomes a tool error the model can respond to; Flue does not silently truncate it. The images persist with the conversation and are hydrated into the original agent's next model request after a restart.
+Image `data` is raw RFC 4648 base64 without a `data:` prefix. Accepted MIME types are PNG, JPEG, GIF, and WebP. Each image may contain at most 14 MiB of base64 text, and one result may contain at most 20 MiB of base64 image data in total. The aggregate byte budget, rather than an arbitrary image-count cap, bounds results with many small images. Invalid or oversized content becomes a tool error the model can respond to; Flue does not silently truncate it. The images persist with the conversation and are hydrated into the original agent's next model request after a restart.
 
 A bare `string` return is shorthand for `{ output: <string> }`. Returning nothing is allowed only when no `output` schema is declared; any other bare return throws. `terminate: true` ends the agent's turn once the current tool batch settles, the same contract `finish`/`give_up` use. Add an optional `output` schema when the returned shape should be typed and validated too:
 

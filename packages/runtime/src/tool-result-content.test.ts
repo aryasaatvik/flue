@@ -9,7 +9,6 @@ import {
 	defineTool,
 	MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH,
 	MAX_TOOL_RESULT_IMAGE_TOTAL_BASE64_LENGTH,
-	MAX_TOOL_RESULT_IMAGES,
 	resolveToolRun,
 } from './tool.ts';
 
@@ -112,7 +111,7 @@ describe('custom tool model content', () => {
 		}
 	});
 
-	it('rejects malformed, unsupported, and over-budget images instead of truncating them', () => {
+	it('accepts many small images and rejects malformed or over-budget images', () => {
 		const tool = defineTool({ name: 'image', description: 'Return an image.', run() {} });
 		const resolveImageContent = (content: unknown) => resolveToolRun(tool, { content } as never);
 
@@ -126,9 +125,9 @@ describe('custom tool model content', () => {
 		).toThrow('must be image/png, image/jpeg, image/gif, or image/webp');
 
 		const onePixel = { type: 'image', data: 'AAAA', mimeType: 'image/png' };
-		expect(() =>
-			resolveImageContent(Array.from({ length: MAX_TOOL_RESULT_IMAGES + 1 }, () => onePixel)),
-		).toThrow(`exceeds the ${MAX_TOOL_RESULT_IMAGES}-image limit`);
+		expect(resolveImageContent(Array.from({ length: 100 }, () => onePixel)).content).toHaveLength(
+			100,
+		);
 
 		const oversized = 'AAAA'.repeat(MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH / 4 + 1);
 		expect(() =>
