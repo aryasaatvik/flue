@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -115,11 +116,24 @@ function resolveManifest() {
 }
 
 function listUploads() {
-	return JSON.parse(
-		run('scratchpad', ['uploads', 'list', '--profile', 'production', '--json'], {
-			capture: true,
-		}),
-	);
+	// Scratchpad's piped JSON output can stop at the pipe's 64 KiB high-water mark.
+	// A regular file preserves the complete production index as it grows.
+	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'flue-scratchpad-uploads-'));
+	const outputPath = join(temporaryDirectory, 'uploads.json');
+	const output = openSync(outputPath, 'w');
+	try {
+		try {
+			execFileSync('scratchpad', ['uploads', 'list', '--profile', 'production', '--json'], {
+				cwd: repositoryRoot,
+				stdio: ['ignore', output, 'inherit'],
+			});
+		} finally {
+			closeSync(output);
+		}
+		return JSON.parse(readFileSync(outputPath, 'utf8'));
+	} finally {
+		rmSync(temporaryDirectory, { recursive: true, force: true });
+	}
 }
 
 function uploadFile(file) {
