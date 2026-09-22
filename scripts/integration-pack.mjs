@@ -1,16 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-	cpSync,
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,31 +48,6 @@ function rewriteLocalVersions(manifest, version) {
 	return rewritten;
 }
 
-function collectPackageManifests(directory, visited = new Set()) {
-	const realDirectory = realpathSync(directory);
-	if (visited.has(realDirectory)) return [];
-	visited.add(realDirectory);
-	const manifests = [];
-	for (const entry of readdirSync(directory)) {
-		const path = join(directory, entry);
-		if (!statSync(path).isDirectory()) continue;
-		if (entry === 'node_modules') {
-			for (const scopeEntry of readdirSync(path)) {
-				const scopePath = join(path, scopeEntry);
-				if (!statSync(scopePath).isDirectory()) continue;
-				manifests.push(...collectPackageManifests(scopePath, visited));
-			}
-			continue;
-		}
-		const manifestPath = join(path, 'package.json');
-		try {
-			manifests.push({ path: manifestPath, value: JSON.parse(readFileSync(manifestPath, 'utf8')) });
-		} catch {}
-		manifests.push(...collectPackageManifests(path, visited));
-	}
-	return manifests;
-}
-
 function verifyFreshConsumer(artifacts, version) {
 	const consumer = mkdtempSync(join(tmpdir(), 'flue-samva-consumer-'));
 	try {
@@ -109,28 +74,38 @@ function verifyFreshConsumer(artifacts, version) {
 		run('bun', ['install'], { cwd: consumer });
 		writeFileSync(
 			join(consumer, 'verify.mjs'),
-			`import { defineTool } from '@flue/runtime';\n` +
+			`import { dirname, join } from 'node:path';\n` +
+				`import { readFileSync, realpathSync } from 'node:fs';\n` +
+				`import { defineTool } from '@flue/runtime';\n` +
 				`import { createFlueClient } from '@flue/sdk';\n` +
 				`import { useFlueAgent } from '@flue/react';\n` +
 				`import { flue } from '@flue/vite';\n` +
 				`for (const [name, value] of Object.entries({ defineTool, createFlueClient, useFlueAgent, flue })) {\n` +
 				`  if (typeof value !== 'function') throw new Error(name + ' export is unavailable');\n` +
-				`}\n`,
+				`}\n` +
+				`const roots = Object.fromEntries(['runtime', 'sdk', 'react', 'vite'].map((name) => {\n` +
+				`  const specifier = '@flue/' + name;\n` +
+				`  const entry = Bun.resolveSync(specifier, import.meta.dir);\n` +
+				`  let directory = dirname(entry);\n` +
+				`  while (!directory.endsWith('/@flue/' + name)) directory = dirname(directory);\n` +
+				`  return [name, realpathSync(directory)];\n` +
+				`}));\n` +
+				`const runtimeFromVite = realpathSync(dirname(Bun.resolveSync('@flue/runtime', join(roots.vite, 'dist'))));\n` +
+				`const sdkFromReact = realpathSync(dirname(Bun.resolveSync('@flue/sdk', join(roots.react, 'dist'))));\n` +
+				`const manifests = Object.fromEntries(Object.entries(roots).map(([name, root]) => [name, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))]));\n` +
+				`console.log(JSON.stringify({ roots, runtimeFromVite, sdkFromReact, manifests }));\n`,
 		);
-		run('bun', ['verify.mjs'], { cwd: consumer });
-		const installed = collectPackageManifests(join(consumer, 'node_modules')).filter(({ value }) =>
-			packageNames.includes(value.name),
-		);
-		for (const name of packageNames) {
-			const matches = installed.filter(({ value }) => value.name === name);
-			if (
-				matches.length !== 1 ||
-				matches[0].value.version !== version ||
-				matches[0].value.samvaIntegrationPackageSet !== version
-			) {
-				throw new Error(
-					`Fresh consumer resolved ${name} ${matches.length} time(s): ${matches.map(({ value }) => value.version).join(', ')}`,
-				);
+		const resolution = JSON.parse(run('bun', ['verify.mjs'], { cwd: consumer, capture: true }));
+		if (!resolution.runtimeFromVite.startsWith(resolution.roots.runtime)) {
+			throw new Error('Fresh consumer resolved @flue/vite against a second runtime copy.');
+		}
+		if (!resolution.sdkFromReact.startsWith(resolution.roots.sdk)) {
+			throw new Error('Fresh consumer resolved @flue/react against a second SDK copy.');
+		}
+		for (const name of packageDirectories) {
+			const installed = resolution.manifests[name];
+			if (installed.version !== version || installed.samvaIntegrationPackageSet !== version) {
+				throw new Error(`Fresh consumer resolved @flue/${name}@${installed.version}.`);
 			}
 		}
 	} finally {
