@@ -229,6 +229,7 @@ import type {
 	TaskOptions,
 	ThinkingLevel,
 	ToolDefinition,
+	ToolResultContent,
 	ToolStep,
 } from './types.ts';
 import { addUsage, emptyUsage, fromProviderUsage } from './usage.ts';
@@ -2963,23 +2964,34 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		const params = block?.arguments ?? {};
 		const startedAt = Date.now();
 		const outcomeKey = `${encodeCanonicalId(partial.entryId)}_${encodeCanonicalId(toolCallId)}`;
-		const buildOutcome = (
+		const buildOutcome = async (
 			isError: boolean,
 			text: string,
 			output?: unknown,
 			terminate?: boolean,
-		): ConversationRecord => ({
-			...this.canonicalEnvelope('tool_outcome', `record_tool_outcome_${outcomeKey}`),
-			type: 'tool_outcome',
-			assistantMessageId: partial.entryId,
-			toolCallId,
-			toolName: toolDef.name,
-			isError,
-			content: [{ type: 'text', text }],
-			...(output !== undefined ? { output } : {}),
-			...(terminate ? { terminate: true } : {}),
-			durationMs: durationSince(startedAt),
-		});
+			content?: ToolResultContent[],
+		): Promise<ConversationRecord> => {
+			const messageId = toolResultEntryId(partial.entryId, toolCallId);
+			const canonicalContent = await this.persistToolResultContent(
+				{
+					content: content ?? [{ type: 'text', text }],
+					details: {},
+				},
+				messageId,
+			);
+			return {
+				...this.canonicalEnvelope('tool_outcome', `record_tool_outcome_${outcomeKey}`),
+				type: 'tool_outcome',
+				assistantMessageId: partial.entryId,
+				toolCallId,
+				toolName: toolDef.name,
+				isError,
+				content: canonicalContent,
+				...(output !== undefined ? { output } : {}),
+				...(terminate ? { terminate: true } : {}),
+				durationMs: durationSince(startedAt),
+			};
+		};
 		const log = this.createToolLogger(toolDef.name, toolCallId);
 		// Fresh invocation scope per execution attempt (see createCustomTools):
 		// child sessions never collide with a prior attempt's retained
@@ -2997,15 +3009,16 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				...(harness ? { harness } : {}),
 			});
 			const resolved = resolveToolRun(toolDef, await toolDef.run(parsed.context));
-			return buildOutcome(
+			return await buildOutcome(
 				false,
 				resolved.output === undefined ? 'null' : JSON.stringify(resolved.output),
 				resolved.output,
 				resolved.terminate,
+				resolved.content,
 			);
 		} catch (error) {
 			if (signal.aborted) throw error;
-			return buildOutcome(true, error instanceof Error ? error.message : String(error));
+			return await buildOutcome(true, error instanceof Error ? error.message : String(error));
 		} finally {
 			if (harness) {
 				this.activeActionHarnesses.delete(harness);
@@ -4107,7 +4120,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 							);
 							const output = resolved.output;
 							return {
-								content: [
+								content: resolved.content ?? [
 									{
 										type: 'text' as const,
 										text: output === undefined ? 'null' : JSON.stringify(output),

@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 import { useTool } from './hooks/use-tool.ts';
 import { defineTool } from './tool.ts';
-import type { ToolRunEnvelope } from './tool-types.ts';
+import type { ToolResultContent, ToolRunEnvelope } from './tool-types.ts';
 
 declare const alreadyDone: boolean;
 declare const factCount: number;
@@ -41,6 +41,17 @@ void readonlyArray;
 
 const explicitUndefined: ToolRunEnvelope<undefined> = { output: undefined };
 void explicitUndefined;
+
+const screenshotContent = [
+	{ type: 'text', text: 'Rendered the page.' },
+	{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+] as const satisfies readonly ToolResultContent[];
+
+const multimodalOutput: ToolRunEnvelope<undefined> = {
+	output: { url: 'https://example.com' },
+	content: screenshotContent,
+};
+void multimodalOutput;
 
 // Undefined array elements do not have a JSON representation and remain invalid.
 const undefinedArrayElement: ToolRunEnvelope<undefined> = {

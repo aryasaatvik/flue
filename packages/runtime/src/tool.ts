@@ -1,9 +1,9 @@
+import { composeTimeoutSignal, raceToolWithDeadline } from './abort.ts';
 import {
 	ToolInputValidationError,
 	ToolOutputSerializationError,
 	ToolOutputValidationError,
 } from './errors.ts';
-import { composeTimeoutSignal, raceToolWithDeadline } from './abort.ts';
 import { cloneJsonSerializable } from './json-snapshot.ts';
 import type { McpToolAnnotations } from './mcp-types.ts';
 import { generateToolCallId } from './runtime/ids.ts';
@@ -14,6 +14,8 @@ import type {
 	ToolInputSchema,
 	ToolOutput,
 	ToolOutputSchema,
+	ToolResultContent,
+	ToolResultImageMimeType,
 	ToolStep,
 } from './tool-types.ts';
 import type { FlueHarness, FlueLogger } from './types.ts';
@@ -231,7 +233,24 @@ function createEphemeralToolStep(toolName: string): ToolStep {
 	};
 }
 
-const TOOL_RUN_ENVELOPE_FIELDS = new Set(['output', 'terminate']);
+const TOOL_RUN_ENVELOPE_FIELDS = new Set(['output', 'content', 'terminate']);
+
+/**
+ * One image may use at most 14 MiB of base64 text (about 10.5 MiB decoded),
+ * matching Flue's existing prompt-image ceiling. Four images and 20 MiB total
+ * bound array overhead and decoded-plus-base64 residency on 128 MiB Workers
+ * while leaving room for a full-page screenshot plus supporting crops.
+ */
+export const MAX_TOOL_RESULT_IMAGES = 4;
+export const MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH = 14 * 1024 * 1024;
+export const MAX_TOOL_RESULT_IMAGE_TOTAL_BASE64_LENGTH = 20 * 1024 * 1024;
+
+const TOOL_RESULT_IMAGE_MIME_TYPES = new Set([
+	'image/png',
+	'image/jpeg',
+	'image/gif',
+	'image/webp',
+]);
 
 /**
  * Resolve a tool run's raw return value into the canonical
@@ -253,10 +272,13 @@ const TOOL_RUN_ENVELOPE_FIELDS = new Set(['output', 'terminate']);
 export function resolveToolRun<TTool extends ToolDefinition>(
 	tool: TTool,
 	result: unknown,
-): { output: ToolOutput<TTool>; terminate: boolean } {
+): { output: ToolOutput<TTool>; content?: ToolResultContent[]; terminate: boolean } {
 	const envelope = coerceToolRunEnvelope(tool.name, result);
 	return {
 		output: validateToolOutput(tool, envelope.output),
+		...(envelope.content === undefined
+			? {}
+			: { content: validateToolResultContent(tool.name, envelope.content) }),
 		terminate: envelope.terminate === true,
 	};
 }
@@ -264,7 +286,7 @@ export function resolveToolRun<TTool extends ToolDefinition>(
 function coerceToolRunEnvelope(
 	toolName: string,
 	result: unknown,
-): { output?: unknown; terminate?: boolean } {
+): { output?: unknown; content?: unknown; terminate?: boolean } {
 	if (result === undefined) return {};
 	if (typeof result === 'string') return { output: result };
 	if (isPlainObject(result)) {
@@ -272,7 +294,7 @@ function coerceToolRunEnvelope(
 			if (!TOOL_RUN_ENVELOPE_FIELDS.has(key)) {
 				throw new Error(
 					`[flue] Tool "${toolName}" run() returned an object with unexpected key "${key}". ` +
-						'run() results are `{ output?, terminate? }` envelopes — to return the object ' +
+						'run() results are `{ output?, content?, terminate? }` envelopes — to return the object ' +
 						'itself as the tool output, wrap it: `return { output: <value> }`.',
 				);
 			}
@@ -287,7 +309,7 @@ function coerceToolRunEnvelope(
 	}
 	throw new Error(
 		`[flue] Tool "${toolName}" run() returned a bare ${describeToolRunValue(result)}. ` +
-			'run() results are `{ output?, terminate? }` envelopes — wrap the value: ' +
+			'run() results are `{ output?, content?, terminate? }` envelopes — wrap the value: ' +
 			'`return { output: <value> }`. (A bare string remains shorthand for `{ output: <string> }`.)',
 	);
 }
@@ -304,6 +326,95 @@ function describeToolRunValue(value: unknown): string {
 	if (value === null) return 'null';
 	if (Array.isArray(value)) return 'array';
 	return typeof value;
+}
+
+function validateToolResultContent(toolName: string, value: unknown): ToolResultContent[] {
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new Error(
+			`[flue] Tool "${toolName}" content must be a non-empty array of text/image blocks.`,
+		);
+	}
+	let imageCount = 0;
+	let totalImageDataLength = 0;
+	return value.map((block, index) => {
+		if (!isPlainObject(block)) {
+			throw new Error(`[flue] Tool "${toolName}" content[${index}] must be an object.`);
+		}
+		if (block.type === 'text') {
+			if (Object.keys(block).some((key) => key !== 'type' && key !== 'text')) {
+				throw new Error(
+					`[flue] Tool "${toolName}" content[${index}] text block has unknown fields.`,
+				);
+			}
+			if (typeof block.text !== 'string') {
+				throw new Error(`[flue] Tool "${toolName}" content[${index}].text must be a string.`);
+			}
+			return { type: 'text', text: block.text };
+		}
+		if (block.type !== 'image') {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}].type must be "text" or "image".`,
+			);
+		}
+		if (Object.keys(block).some((key) => !['type', 'data', 'mimeType'].includes(key))) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}] image block has unknown fields.`,
+			);
+		}
+		if (typeof block.mimeType !== 'string' || !TOOL_RESULT_IMAGE_MIME_TYPES.has(block.mimeType)) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}].mimeType must be image/png, image/jpeg, image/gif, or image/webp.`,
+			);
+		}
+		if (typeof block.data !== 'string') {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}].data must be non-empty RFC 4648 base64 without a data URL prefix.`,
+			);
+		}
+		imageCount++;
+		if (imageCount > MAX_TOOL_RESULT_IMAGES) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content exceeds the ${MAX_TOOL_RESULT_IMAGES}-image limit.`,
+			);
+		}
+		if (block.data.length > MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}].data exceeds the ${MAX_TOOL_RESULT_IMAGE_BASE64_LENGTH}-character per-image limit.`,
+			);
+		}
+		totalImageDataLength += block.data.length;
+		if (totalImageDataLength > MAX_TOOL_RESULT_IMAGE_TOTAL_BASE64_LENGTH) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content image data exceeds the ${MAX_TOOL_RESULT_IMAGE_TOTAL_BASE64_LENGTH}-character aggregate limit.`,
+			);
+		}
+		if (!isCanonicalBase64(block.data)) {
+			throw new Error(
+				`[flue] Tool "${toolName}" content[${index}].data must be non-empty RFC 4648 base64 without a data URL prefix.`,
+			);
+		}
+		return {
+			type: 'image',
+			data: block.data,
+			mimeType: block.mimeType as ToolResultImageMimeType,
+		};
+	});
+}
+
+function isCanonicalBase64(value: string): boolean {
+	if (value.length === 0 || value.length % 4 !== 0) return false;
+	const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+	const dataLength = value.length - padding;
+	if ((padding === 2 && dataLength % 4 !== 2) || (padding === 1 && dataLength % 4 !== 3)) {
+		return false;
+	}
+	for (let index = 0; index < dataLength; index++) {
+		const code = value.charCodeAt(index);
+		const alphaNumeric =
+			(code >= 65 && code <= 90) || (code >= 97 && code <= 122) || (code >= 48 && code <= 57);
+		if (!alphaNumeric && code !== 43 && code !== 47) return false;
+	}
+	return true;
 }
 
 function validateToolOutput<TTool extends ToolDefinition>(

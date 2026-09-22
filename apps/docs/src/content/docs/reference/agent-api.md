@@ -506,7 +506,25 @@ A typing and validation helper: it validates the definition and returns it froze
 - `harness`, `durable` — capability flags, detailed below. Must be booleans when present.
 - `timeoutMs` — an optional bound on one call's execution, in milliseconds. On expiry the harness aborts the tool's `context.signal` and settles the call with a `ToolTimeoutError` (a tool error the model sees, so the conversation continues); the submission's durability timeout remains the outer backstop. See [Bounded tools](/docs/guide/tools/#bounded-tools).
 - `annotations` — optional MCP-compatible tool hints: `title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. [`createMcpConnection()`](#createmcpconnection) copies these from each server `tools/list` entry; wrappers can preserve them and application code can use them when deciding whether a call needs approval. The runtime does not alter execution from these hints. Treat them as untrusted unless you trust the MCP server that supplied them.
-- `run` — the implementation. May be async, and returns a `ToolRunEnvelope` — `{ output?, terminate? }`. `output` is the tool's result: it must be JSON-serializable, is snapshotted as JSON-compatible data, and is then JSON-stringified for the model; non-serializable output throws `ToolOutputSerializationError`. Returning a bare `string` is shorthand for `{ output: <string> }`, and returning nothing (`void`) is allowed only when no `output` schema is declared, reaching the model as `null`; any other bare return — a plain object, array, number, boolean, or `null` — throws, telling you to wrap it as `{ output: <value> }`. `terminate: true` ends the agent's turn once the current tool batch settles, the same loop-ending contract `finish`/`give_up` use — a multi-tool batch ends the turn only when every result in it terminates, a throwing tool never terminates, and the flag is recorded on the tool's canonical outcome, so termination survives a crash between the batch committing and the submission settling. Throwing inside `run` records a tool error the model sees; it does not fail the submission.
+- `run` — the implementation. May be async, and returns a `ToolRunEnvelope` — `{ output?, content?, terminate? }`. `output` is the tool's structured result: it must be JSON-serializable, is snapshotted as JSON-compatible data, and is JSON-stringified for the model when `content` is absent; non-serializable output throws `ToolOutputSerializationError`. `content` is a non-empty array of model-facing text/image blocks, useful when the original authoring model must inspect an artifact while application readers retain structured metadata in `output`. Image data is raw RFC 4648 base64 (never a data URL) with one of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`. Flue rejects malformed data, more than 4 images, an image over 14 MiB of base64 text, or more than 20 MiB of base64 image data in one result; it never truncates. Returning a bare `string` is shorthand for `{ output: <string> }`, and returning nothing (`void`) is allowed only when no `output` schema is declared, reaching the model as `null`; any other bare return — a plain object, array, number, boolean, or `null` — throws, telling you to wrap it as `{ output: <value> }`. `terminate: true` ends the agent's turn once the current tool batch settles, the same loop-ending contract `finish`/`give_up` use — a multi-tool batch ends the turn only when every result in it terminates, a throwing tool never terminates, and the flag is recorded on the tool's canonical outcome, so termination survives a crash between the batch committing and the submission settling. Throwing inside `run` records a tool error the model sees; it does not fail the submission.
+
+```ts
+useTool({
+  name: 'capture_screenshot',
+  description: 'Capture the rendered page and return it for visual inspection.',
+  async run() {
+    const screenshot = await capturePage();
+    return {
+      output: { url: screenshot.url, width: screenshot.width, height: screenshot.height },
+      content: [
+        { type: 'text', text: `Rendered ${screenshot.url}.` },
+        { type: 'image', data: screenshot.base64, mimeType: 'image/png' },
+      ],
+    };
+  },
+});
+```
+
 - Arguments that fail the `input` schema throw `ToolInputValidationError` before `run` is invoked; the model receives the validation failure as the tool result and may retry.
 
 Error classes are documented in [Errors](/docs/reference/errors/). For teaching material see the [Tools guide](/docs/guide/tools/).

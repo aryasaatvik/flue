@@ -5,6 +5,19 @@ import type { FlueHarness, FlueLogger } from './types.ts';
 export type ToolInputSchema = v.GenericSchema<Record<string, unknown>, unknown>;
 export type ToolOutputSchema = v.GenericSchema<any, NonNullable<unknown> | null>;
 
+/** Image formats accepted in model-facing custom-tool results. */
+export type ToolResultImageMimeType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
+
+/** One model-facing content block returned by a custom tool. */
+export type ToolResultContent =
+	| { readonly type: 'text'; readonly text: string }
+	| {
+			readonly type: 'image';
+			/** Raw RFC 4648 base64, without a `data:` URL prefix. */
+			readonly data: string;
+			readonly mimeType: ToolResultImageMimeType;
+	  };
+
 /**
  * The durable-step surface a `durable: true` tool's `run` receives. Each
  * completed step is recorded as a canonical conversation record; when the
@@ -79,17 +92,27 @@ type ToolRunOutputValue =
 	| { [key: string]: ToolRunOutputValue | undefined };
 
 /**
- * The canonical `run` return shape: `output` is the tool's result value
- * (validated against the declared `output` schema, and what the model sees
- * serialized as JSON), and `terminate: true` ends the agent's turn after the
+ * The canonical `run` return shape: `output` is the tool's structured result
+ * value (validated against the declared `output` schema). By default the model
+ * sees it serialized as JSON; `content` overrides that model-facing projection
+ * with text/image blocks while preserving `output` for application readers.
+ * `terminate: true` ends the agent's turn after the
  * current tool batch settles — the same loop-ending contract the built-in
  * `finish`/`give_up` tools use, honored across crash recovery. `output` is
  * required when an `output` schema is declared (forgetting the value is a bug
  * the type should catch) and optional otherwise.
  */
 export type ToolRunEnvelope<S extends ToolOutputSchema | undefined> = S extends ToolOutputSchema
-	? { output: v.InferInput<S>; terminate?: boolean }
-	: { output?: ToolRunOutputValue | undefined; terminate?: boolean };
+	? {
+			output: v.InferInput<S>;
+			content?: readonly ToolResultContent[];
+			terminate?: boolean;
+		}
+	: {
+			output?: ToolRunOutputValue | undefined;
+			content?: readonly ToolResultContent[];
+			terminate?: boolean;
+		};
 
 // Bare-string sugar: `return 'text'` means `return { output: 'text' }`. The
 // string arm exists only where a string is a valid output to begin with (no

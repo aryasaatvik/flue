@@ -52,7 +52,21 @@ The model reads the tool's name, description, and input schema; when it decides 
 
 **Input.** The `input` schema is a [Valibot](https://valibot.dev) schema and must be a top-level object schema. Model-supplied arguments are parsed by it before `run` executes, and `run` receives the parsed value as `data`, fully typed. When validation fails, `run` is never called — the failure goes back to the model as a tool error so it can correct its arguments and retry.
 
-**Output.** `run` returns a result envelope, `{ output?, terminate? }`, not a bare value. `output` is the JSON-compatible data (an object, array, string, number — anything JSON-serializable) that's JSON-stringified for the model, and a bare `string` return is shorthand for `{ output: <string> }`. Returning nothing is allowed only when no `output` schema is declared; any other bare return throws. `terminate: true` ends the agent's turn once the current tool batch settles, the same contract `finish`/`give_up` use. Add an optional `output` schema when the returned shape should be typed and validated too:
+**Output.** `run` returns a result envelope, `{ output?, content?, terminate? }`, not a bare value. `output` is JSON-compatible structured data (an object, array, string, number — anything JSON-serializable). With no `content`, it is JSON-stringified for the model exactly as before. Add `content` when the model should instead receive text and images while application readers retain metadata in `output`:
+
+```ts
+return {
+  output: { url, width, height },
+  content: [
+    { type: 'text', text: `Rendered ${url}.` },
+    { type: 'image', data: pngBase64, mimeType: 'image/png' },
+  ],
+};
+```
+
+Image `data` is raw RFC 4648 base64 without a `data:` prefix. Accepted MIME types are PNG, JPEG, GIF, and WebP. A result may contain at most 4 images, each at most 14 MiB of base64 text, and at most 20 MiB of base64 image data in total. Invalid or oversized content becomes a tool error the model can respond to; Flue does not silently truncate it. The images persist with the conversation and are hydrated into the original agent's next model request after a restart.
+
+A bare `string` return is shorthand for `{ output: <string> }`. Returning nothing is allowed only when no `output` schema is declared; any other bare return throws. `terminate: true` ends the agent's turn once the current tool batch settles, the same contract `finish`/`give_up` use. Add an optional `output` schema when the returned shape should be typed and validated too:
 
 ```ts
 const checkInventory = defineTool({
