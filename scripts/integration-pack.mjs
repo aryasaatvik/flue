@@ -83,6 +83,9 @@ function collectPackageManifests(directory, visited = new Set()) {
 function verifyFreshConsumer(artifacts, version) {
 	const consumer = mkdtempSync(join(tmpdir(), 'flue-samva-consumer-'));
 	try {
+		const artifactReferences = Object.fromEntries(
+			artifacts.map((artifact) => [artifact.name, `file:${artifact.path}`]),
+		);
 		writeFileSync(
 			join(consumer, 'package.json'),
 			JSON.stringify(
@@ -91,10 +94,11 @@ function verifyFreshConsumer(artifacts, version) {
 					private: true,
 					type: 'module',
 					dependencies: Object.fromEntries([
-						...artifacts.map((artifact) => [artifact.name, `file:${artifact.path}`]),
+						...Object.entries(artifactReferences),
 						['react', '^19.1.1'],
 						['vite', '^8.1.2'],
 					]),
+					overrides: artifactReferences,
 				},
 				null,
 				2,
@@ -192,7 +196,9 @@ function main() {
 			});
 		}
 		if (run('git', ['status', '--porcelain'], { capture: true }).trim()) {
-			throw new Error('Build or prepack changed tracked source; refusing non-reproducible artifacts.');
+			throw new Error(
+				'Build or prepack changed tracked source; refusing non-reproducible artifacts.',
+			);
 		}
 		verifyFreshConsumer(artifacts, version);
 	} finally {
