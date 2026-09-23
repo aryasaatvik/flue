@@ -153,6 +153,8 @@ export interface CloudflareAgentRuntime {
 		readonly storage: CloudflareAgentStorage;
 		readonly className: string;
 		readonly agentName: string;
+		/** Replaces the default SQLite attachment store, which it receives for composition. */
+		readonly createAttachmentStore?: (sqlite: AttachmentStore) => AttachmentStore;
 	}): CloudflareAgentPreparedCoordinator;
 	attach(instance: CloudflareAgentInstance, prepared: CloudflareAgentPreparedCoordinator): void;
 	onStart(
@@ -205,9 +207,13 @@ export function createCloudflareAgentRuntime(
 	};
 
 	return {
-		prepare({ storage, className, agentName }) {
+		prepare({ storage, className, agentName, createAttachmentStore }) {
 			const submissionStore = createSqlAgentExecutionStore(storage, className);
-			const conversationStores = createSqlConversationStores(storage, className);
+			const conversationStores = createSqlConversationStores(
+				storage,
+				className,
+				createAttachmentStore,
+			);
 			return {
 				agentName,
 				submissionStore,

@@ -1,5 +1,6 @@
 import type { AgentSubmissionStore } from '../agent-execution-store.ts';
 import { describeErrorChain, formatErrorForLog } from '../errors.ts';
+import type { AttachmentStore } from '../runtime/attachment-store.ts';
 import { SqliteConversationStreamStore } from '../runtime/conversation-stream-store.ts';
 import {
 	createSqlAgentExecutionStoreFromSql,
@@ -33,21 +34,48 @@ function initFailure(className: string, what: string, cause: unknown): Error {
 	return wrapped;
 }
 
-export function createSqlConversationStores(storage: DurableObjectStorage, className: string) {
+/**
+ * The conversation stores for one Durable Object. Attachments default to the
+ * Durable Object's SQLite database; `createAttachmentStore` (from the agent
+ * module's `extend({ attachmentStore })`) replaces that store and receives it
+ * for composition.
+ */
+export function createSqlConversationStores(
+	storage: DurableObjectStorage,
+	className: string,
+	createAttachmentStore?: (sqlite: AttachmentStore) => AttachmentStore,
+) {
 	const sql = storage.sql as SqlStorage;
 	const transactionSync = storage.transactionSync as NonNullable<
 		DurableObjectStorage['transactionSync']
 	>;
 	const runTransaction = <T>(closure: () => T): T => transactionSync.call(storage, closure) as T;
+	let stores: { conversationStreamStore: SqliteConversationStreamStore; sqlite: AttachmentStore };
 	try {
 		ensureSqlAttachmentTable(sql);
-		return {
+		stores = {
 			conversationStreamStore: new SqliteConversationStreamStore(sql, runTransaction),
-			attachmentStore: new SqliteAttachmentStore(sql, runTransaction),
+			sqlite: new SqliteAttachmentStore(sql, runTransaction),
 		};
 	} catch (cause) {
 		throw initFailure(className, 'SQLite conversation stores', cause);
 	}
+	if (!createAttachmentStore) {
+		return {
+			conversationStreamStore: stores.conversationStreamStore,
+			attachmentStore: stores.sqlite,
+		};
+	}
+	let attachmentStore: AttachmentStore;
+	try {
+		attachmentStore = createAttachmentStore(stores.sqlite);
+		if (typeof attachmentStore?.put !== 'function' || typeof attachmentStore.get !== 'function') {
+			throw new Error('cloudflare.attachmentStore must return an object with put() and get().');
+		}
+	} catch (cause) {
+		throw initFailure(className, 'attachment store', cause);
+	}
+	return { conversationStreamStore: stores.conversationStreamStore, attachmentStore };
 }
 
 export function createSqlAgentExecutionStore(

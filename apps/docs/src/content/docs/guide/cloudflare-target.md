@@ -297,7 +297,7 @@ function extend<TBase extends object = CloudflareAgentLike, TEnv = any>(
 ): CloudflareExtension<TBase, TEnv>;
 ```
 
-Creates a branded Cloudflare extension descriptor for an agent module. The descriptor may contain `base` and `wrap` callbacks.
+Creates a branded Cloudflare extension descriptor for an agent module. The descriptor may contain `base`, `wrap`, and `attachmentStore` callbacks.
 
 Both callbacks are typed against `CloudflareAgentLike`, a structural view of the Agents SDK `Agent` base class covering `state`, `setState()`, `onStart()`, `schedule()`, `scheduleEvery()`, and `queue()`, so typos inside `base` callbacks fail at typecheck. Pass an explicit `TBase` (for example `extend<CloudflareAgentLike<MyState>>({ ... })`) to type against a richer class shape, and an explicit `TEnv` to type the `env` an instrumentation callback receives.
 
@@ -306,6 +306,8 @@ Both callbacks are typed against `CloudflareAgentLike`, a structural view of the
 `wrap(Final)` must return the received class or a prototype-preserving constructor wrapper. Use it for integrations that instrument or proxy the final generated class without replacing its prototype. Subclasses are rejected; only the same class or a `new Proxy(Final, {...})` pattern is allowed. The class both callbacks receive is typed as a real Durable Object constructor, so brand-checked wrappers such as `@sentry/cloudflare`'s `instrumentDurableObjectWithSentry` accept it directly, with no casts or explicit generics.
 
 Both callbacks are optional. When omitted, the corresponding step is an identity operation.
+
+`attachmentStore(context)` replaces the Durable Object SQLite store that holds attachment bytes (user-message and tool-result images). Flue calls it once per Durable Object instance, before the instance handles any work, with `CloudflareAttachmentStoreContext`: `env`, `agentName`, `className`, `durableObjectId`, and `sqlite` (the default store, for composition such as reading attachments written before a switch). It must synchronously return an `AttachmentStore` (`put`/`get`, from `@flue/runtime/adapter`). Each call's `streamPath` already names the agent and instance. Verify bytes with `verifyAttachmentBytes` from `@flue/runtime/adapter`, and return `null` from `get` for an unknown attachment.
 
 ### `getCloudflareContext()`
 

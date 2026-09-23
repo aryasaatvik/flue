@@ -27,6 +27,7 @@ export type { CloudflareContext, FlueDurableObjectIdentity } from './context.ts'
 export { getCloudflareContext, getDurableObjectIdentity } from './context.ts';
 export type {
 	CloudflareAgentLike,
+	CloudflareAttachmentStoreContext,
 	CloudflareExtension,
 	ExtensionClass,
 	GeneratedDurableObjectClass,

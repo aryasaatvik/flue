@@ -24,6 +24,7 @@ type CloudflareAgentStorage = Parameters<CloudflareAgentRuntime['prepare']>[0]['
 
 interface DurableObjectStateLike {
 	readonly storage: CloudflareAgentStorage;
+	readonly id: { toString(): string };
 }
 
 export interface CreateFlueAgentClassOptions {
@@ -64,7 +65,24 @@ export function createFlueAgentClass(options: CreateFlueAgentClassOptions): Exte
 			// synchronously schedule callbacks that reach the coordinator's
 			// stores, so they are created from ctx.storage first (statements
 			// before super() are legal while `this` stays untouched).
-			const prepared = runtime.prepare({ storage: ctx.storage, className, agentName });
+			const createAttachmentStore = resolved.attachmentStore;
+			const prepared = runtime.prepare({
+				storage: ctx.storage,
+				className,
+				agentName,
+				...(createAttachmentStore
+					? {
+							createAttachmentStore: (sqlite) =>
+								createAttachmentStore({
+									env,
+									agentName,
+									className,
+									durableObjectId: ctx.id.toString(),
+									sqlite,
+								}),
+						}
+					: {}),
+			});
 			super(ctx, env);
 			runtime.attach(this as unknown as CloudflareAgentInstance, prepared);
 		}

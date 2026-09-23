@@ -1,4 +1,5 @@
 import type { DurableObject } from 'cloudflare:workers';
+import type { AttachmentStore } from '../runtime/attachment-store.ts';
 
 const CLOUDFLARE_EXTENSION = Symbol.for('@flue/runtime/cloudflare-extension');
 
@@ -57,11 +58,41 @@ export type GeneratedDurableObjectClass<
 	TEnv = any,
 > = new (ctx: DurableObjectState, env: TEnv) => TInstance & DurableObject<TEnv>;
 
+/** What an `extend({ attachmentStore })` factory receives, once per Durable Object instance. */
+export interface CloudflareAttachmentStoreContext<TEnv = any> {
+	/** The Worker's bindings, as passed to the Durable Object constructor. */
+	readonly env: TEnv;
+	/** The agent's durable identity, e.g. `triage`. */
+	readonly agentName: string;
+	/** The generated Durable Object class name, e.g. `FlueTriageAgent`. */
+	readonly className: string;
+	/** `DurableObjectState.id.toString()`: unique per agent instance. */
+	readonly durableObjectId: string;
+	/**
+	 * The built-in Durable Object SQLite store — the default when no factory
+	 * is given. Compose with it, for example to keep reading attachments
+	 * written before switching stores.
+	 */
+	readonly sqlite: AttachmentStore;
+}
+
 export interface CloudflareExtension<TBase extends object = CloudflareAgentLike, TEnv = any> {
 	base?: (Base: GeneratedDurableObjectClass<TBase, TEnv>) => ExtensionClass<TBase>;
 	wrap?: (
 		Final: GeneratedDurableObjectClass<TBase, TEnv>,
 	) => GeneratedDurableObjectClass<TBase, TEnv>;
+	/**
+	 * Store attachment bytes (user-message images, tool-result images)
+	 * somewhere other than the Durable Object's SQLite database, such as R2.
+	 * Called synchronously once per Durable Object instance, before the
+	 * instance handles any work. Every attachment written through the store
+	 * must be readable through it for the life of the conversation; `get`
+	 * returns `null` for an unknown attachment. Attachment keys are already
+	 * namespaced by the `streamPath` (agent and instance) in each call.
+	 * Implementations should check bytes with `verifyAttachmentBytes` from
+	 * `@flue/runtime/adapter` on `put` and `get`.
+	 */
+	attachmentStore?: (context: CloudflareAttachmentStoreContext<TEnv>) => AttachmentStore;
 }
 
 interface BrandedCloudflareExtension extends CloudflareExtension<any> {
@@ -72,17 +103,20 @@ interface BrandedCloudflareExtension extends CloudflareExtension<any> {
 export interface ResolvedCloudflareExtension {
 	base(Base: ExtensionClass<any>): ExtensionClass<any>;
 	wrap(Final: ExtensionClass<any>): ExtensionClass<any>;
+	attachmentStore?: (context: CloudflareAttachmentStoreContext) => AttachmentStore;
 }
+
+const EXTENSION_OPTIONS = new Set(['base', 'wrap', 'attachmentStore']);
 
 export function extend<TBase extends object = CloudflareAgentLike, TEnv = any>(
 	extension: CloudflareExtension<TBase, TEnv>,
 ): CloudflareExtension<TBase, TEnv> {
 	if (typeof extension !== 'object' || extension === null || Array.isArray(extension)) {
 		throw new Error(
-			'[flue] extend() expects an object containing optional base and wrap callbacks.',
+			'[flue] extend() expects an object containing optional base, wrap, and attachmentStore callbacks.',
 		);
 	}
-	const unknownKeys = Object.keys(extension).filter((key) => key !== 'base' && key !== 'wrap');
+	const unknownKeys = Object.keys(extension).filter((key) => !EXTENSION_OPTIONS.has(key));
 	if (unknownKeys.length > 0) {
 		throw new Error(`[flue] extend() received unknown option(s): ${unknownKeys.join(', ')}.`);
 	}
@@ -113,7 +147,12 @@ export function resolveCloudflareExtension(
 	if (typeof wrap !== 'function') {
 		throw new Error(`[flue] ${kind} "${name}" cloudflare.wrap must be a function.`);
 	}
+	const attachmentStore = extension.attachmentStore;
+	if (attachmentStore !== undefined && typeof attachmentStore !== 'function') {
+		throw new Error(`[flue] ${kind} "${name}" cloudflare.attachmentStore must be a function.`);
+	}
 	return {
+		...(attachmentStore ? { attachmentStore } : {}),
 		base(Base) {
 			return assertExtensionClass(base(Base), Base, name, kind);
 		},

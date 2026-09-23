@@ -463,7 +463,7 @@ Most agents don't need a remote sandbox. Start with a virtual sandbox and only m
 
 ## Conversation persistence
 
-Generated Cloudflare applications store one append-only canonical conversation stream per agent instance in Durable Object SQLite, with attachment bytes in a separate immutable store. Sessions select conversations from that stream; there is no second session transcript or persisted conversation snapshot. `db.ts` is a Node-only convention — on Cloudflare, Durable Object SQLite is the persistence layer.
+Generated Cloudflare applications store one append-only canonical conversation stream per agent instance in Durable Object SQLite, with attachment bytes in a separate immutable store. That store is also Durable Object SQLite by default; an agent module's `extend({ attachmentStore })` can put attachment bytes elsewhere, such as R2 (see [`extend(...)`](/docs/guide/cloudflare-target/#extend)). Sessions select conversations from that stream; there is no second session transcript or persisted conversation snapshot. `db.ts` is a Node-only convention — on Cloudflare, Durable Object SQLite is the persistence layer.
 
 Filesystem durability remains a separate decision. The default lightweight sandbox uses an in-memory filesystem and must not be treated as durable merely because conversation state is stored in a Durable Object. Use a durable workspace or container-backed integration when files or installed artifacts must survive later activity.
 
