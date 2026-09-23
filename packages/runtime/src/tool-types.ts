@@ -8,6 +8,18 @@ export type ToolOutputSchema = v.GenericSchema<any, NonNullable<unknown> | null>
 /** Image formats accepted in model-facing custom-tool results. */
 export type ToolResultImageMimeType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
+/**
+ * How long the model sees the image blocks of a tool's result.
+ *
+ * - `'conversation'` (default): every later model request carries the images.
+ * - `'turn'`: only the model request immediately after the result carries the
+ *   images. Once an assistant message follows the result, later requests carry
+ *   the result's text and its `<attachments>` manifest (each image's id and
+ *   MIME type) but not the image bytes. The model can load an image again by
+ *   id with the built-in `view_attachment` tool.
+ */
+export type ToolImageRetention = 'conversation' | 'turn';
+
 /** One model-facing content block returned by a custom tool. */
 export type ToolResultContent =
 	| { readonly type: 'text'; readonly text: string }
@@ -172,6 +184,18 @@ export interface ToolDefinition<
 	 * server itself is trusted.
 	 */
 	readonly annotations?: Readonly<McpToolAnnotations>;
+	/**
+	 * How long the model sees image blocks this tool returns in `content`.
+	 * Defaults to `'conversation'`: every later model request carries them.
+	 * `'turn'` sends the images only in the model request right after the
+	 * result; later requests carry the result's text and an `<attachments>`
+	 * manifest listing each image's id. Declaring `'turn'` on any tool adds
+	 * the built-in `view_attachment` tool, which loads images by id for one
+	 * more request. Use `'turn'` for large or frequent images (screenshots)
+	 * whose bytes would otherwise be re-sent, and held in memory, on every
+	 * later request.
+	 */
+	readonly imageRetention?: ToolImageRetention;
 	// `| void` only for the no-`output`-schema case, where an undefined
 	// output is already an allowed result — a bare `() => sideEffect()` with
 	// no return statement is the same value at runtime, so nothing is lost by

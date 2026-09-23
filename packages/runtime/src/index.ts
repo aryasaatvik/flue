@@ -181,6 +181,7 @@ export type {
 	ThinkingLevel,
 	ToolContext,
 	ToolDefinition,
+	ToolImageRetention,
 	ToolInput,
 	ToolInputSchema,
 	ToolOutput,

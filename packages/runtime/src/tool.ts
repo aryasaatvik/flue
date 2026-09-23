@@ -11,6 +11,7 @@ import { isTopLevelObjectSchema, isValibotSchema, parseValibot } from './schema.
 import type {
 	ToolContext,
 	ToolDefinition,
+	ToolImageRetention,
 	ToolInputSchema,
 	ToolOutput,
 	ToolOutputSchema,
@@ -40,6 +41,13 @@ export function defineTool<
 	 * calls.
 	 */
 	annotations?: McpToolAnnotations;
+	/**
+	 * How long the model sees image blocks this tool returns in `content`:
+	 * `'conversation'` (default) keeps them in every later request; `'turn'`
+	 * sends them only in the next request and leaves an `<attachments>`
+	 * manifest the model can pass to the built-in `view_attachment` tool.
+	 */
+	imageRetention?: ToolImageRetention;
 	run: ToolDefinition<TInput, TOutput, THarness, TDurable>['run'];
 }): ToolDefinition<TInput, TOutput, THarness, TDurable> {
 	assertToolDefinition(options, 'defineTool()');
@@ -54,6 +62,7 @@ export function defineTool<
 		...(options.annotations === undefined
 			? {}
 			: { annotations: Object.freeze({ ...options.annotations }) }),
+		...(options.imageRetention !== undefined ? { imageRetention: options.imageRetention } : {}),
 		run: options.run,
 	});
 }
@@ -67,6 +76,7 @@ const TOOL_DEFINITION_FIELDS = new Set([
 	'durable',
 	'timeoutMs',
 	'annotations',
+	'imageRetention',
 	'run',
 ]);
 
@@ -114,6 +124,13 @@ export function assertToolDefinition(
 	}
 	if (tool.durable !== undefined && typeof tool.durable !== 'boolean') {
 		throw new Error(`[flue] ${label} durable must be a boolean.`);
+	}
+	if (
+		tool.imageRetention !== undefined &&
+		tool.imageRetention !== 'conversation' &&
+		tool.imageRetention !== 'turn'
+	) {
+		throw new Error(`[flue] ${label} imageRetention must be "conversation" or "turn".`);
 	}
 	if (tool.annotations !== undefined) {
 		const annotations = tool.annotations;

@@ -66,6 +66,8 @@ return {
 
 Image `data` is raw RFC 4648 base64 without a `data:` prefix. Accepted MIME types are PNG, JPEG, GIF, and WebP. Each image may contain at most 14 MiB of base64 text, and one result may contain at most 20 MiB of base64 image data in total. The aggregate byte budget, rather than an arbitrary image-count cap, bounds results with many small images. Invalid or oversized content becomes a tool error the model can respond to; Flue does not silently truncate it. The images persist with the conversation and are hydrated into the original agent's next model request after a restart.
 
+By default every later model request carries a result's images. For large or frequent images, such as screenshots, set `imageRetention: 'turn'` on the tool: the images reach only the model request right after the result. Once the model has responded, later requests carry the result's text plus an `<attachments>` manifest listing each image's id, and the image bytes are neither re-sent nor loaded from storage. Declaring `'turn'` on any tool adds the framework's `view_attachment` tool, which takes up to four manifest ids and shows those images for one more request.
+
 A bare `string` return is shorthand for `{ output: <string> }`. Returning nothing is allowed only when no `output` schema is declared; any other bare return throws. `terminate: true` ends the agent's turn once the current tool batch settles, the same contract `finish`/`give_up` use. Add an optional `output` schema when the returned shape should be typed and validated too:
 
 ```ts
@@ -105,7 +107,7 @@ An agent with a [sandbox](/docs/guide/sandboxes/) gains a standard set of built-
 
 Each tool's parameters, truncation limits, and error behavior are documented in [Agent Behavior — Built-in tools](/docs/reference/agent-behavior/#built-in-tools).
 
-On top of these, the framework adds its own tools when the capability exists: `task` for [subagent delegation](/docs/guide/subagents/) (always present), `activate_skill` when the agent has [skills](/docs/guide/skills/), and `read_skill_resource` when a skill packages resource files. These names are reserved — a custom tool can't take them.
+On top of these, the framework adds its own tools when the capability exists: `task` for [subagent delegation](/docs/guide/subagents/) (always present), `activate_skill` when the agent has [skills](/docs/guide/skills/), `read_skill_resource` when a skill packages resource files, and `view_attachment` when a tool declares `imageRetention: 'turn'`. These names are reserved — a custom tool can't take them.
 
 A sandbox adapter can replace this set with its own — see [Sandbox-provided tools](/docs/guide/sandboxes/#sandbox-provided-tools) and [`SandboxToolFactory`](/docs/reference/sandbox-api/#sandboxtoolfactory) in the Sandbox Adapter API.
 

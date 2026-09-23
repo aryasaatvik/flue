@@ -1,6 +1,11 @@
 import type { McpToolAnnotations } from '../mcp-types.ts';
 import { assertToolDefinition } from '../tool.ts';
-import type { ToolDefinition, ToolInputSchema, ToolOutputSchema } from '../tool-types.ts';
+import type {
+	ToolDefinition,
+	ToolImageRetention,
+	ToolInputSchema,
+	ToolOutputSchema,
+} from '../tool-types.ts';
 import { requireRenderFrame } from './frame.ts';
 
 /**
@@ -55,6 +60,13 @@ export function useTool<
 	 * hints to gate calls.
 	 */
 	annotations?: McpToolAnnotations;
+	/**
+	 * How long the model sees image blocks this tool returns in `content`:
+	 * `'conversation'` (default) keeps them in every later request; `'turn'`
+	 * sends them only in the next request and leaves an `<attachments>`
+	 * manifest the model can pass to the built-in `view_attachment` tool.
+	 */
+	imageRetention?: ToolImageRetention;
 	run: ToolDefinition<TInput, TOutput, THarness, TDurable>['run'];
 }): void;
 // A definition whose schema generics are already erased to the defaults

@@ -1,5 +1,11 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
+import type {
+	AssistantMessage,
+	ImageContent,
+	TextContent,
+	ToolResultMessage,
+	UserMessage,
+} from '@earendil-works/pi-ai';
 import {
 	type AssistantMessageStartedRecord,
 	type AttachmentRef,
@@ -58,6 +64,12 @@ export interface ReducedMessageEntry extends ReducedEntryBase {
 	 * projected into model context or public history/UI shapes.
 	 */
 	toolTerminate?: boolean;
+	/**
+	 * `'turn'` when the durable tool outcome declared turn-scoped image
+	 * retention: context projection omits this entry's image blocks once an
+	 * included assistant message follows it (the manifest text stays).
+	 */
+	toolImageRetention?: 'turn';
 }
 
 export interface ReducedCompactionEntry extends ReducedEntryBase {
@@ -331,7 +343,7 @@ export interface ReducedContextEntry {
  * against from-scratch folds at every batch boundary, so shape drift without
  * a matching codec change fails CI.
  */
-export const REDUCED_STATE_FORMAT = 3;
+export const REDUCED_STATE_FORMAT = 4;
 
 export function createReducedInstanceState(): ReducedInstanceState {
 	return {
@@ -744,6 +756,7 @@ export function applyConversationRecord(
 					...(outcome.output !== undefined ? { toolOutput: { value: outcome.output } } : {}),
 					...(outcome.durationMs !== undefined ? { toolDurationMs: outcome.durationMs } : {}),
 					...(outcome.terminate === true ? { toolTerminate: true } : {}),
+					...(outcome.imageRetention === 'turn' ? { toolImageRetention: 'turn' } : {}),
 				});
 				parentId = entryId;
 				// The commit consumes its batch: the result content now lives on
@@ -1107,33 +1120,34 @@ export function getActiveConversationPath(conversation: ReducedConversationState
 	return path.reverse();
 }
 
+/**
+ * Project the active path into the model's context. Selection (which entries
+ * reach the model) runs first over the whole projected path; attachment
+ * resolution runs second, so a tool result with turn-scoped image retention
+ * that an included assistant message already answered projects without its
+ * image blocks — and `resolveAttachment` is never called for them. Excluded
+ * assistants (errored/aborted partials, incomplete tool batches) do not count
+ * as answers, so a retried request still carries the images.
+ */
 export function buildConversationContextEntries(
 	conversation: ReducedConversationState,
 	options: ConversationProjectionOptions = {},
 ): ReducedContextEntry[] {
 	const path = getActiveConversationPath(conversation);
 	const latestCompactionIndex = path.findLastIndex((entry) => entry.type === 'compaction');
-	if (latestCompactionIndex === -1) return pathToContextEntries(path, options);
+	if (latestCompactionIndex === -1)
+		return resolveContextSelection(selectContextEntries(path), options);
 	const compaction = path[latestCompactionIndex] as ReducedCompactionEntry;
 	const firstKeptIndex = path.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
 	const keptStart = firstKeptIndex >= 0 ? firstKeptIndex : latestCompactionIndex + 1;
-	return [
-		{
-			message: createUserContextMessage(
-				renderSignalMessage({
-					role: 'signal',
-					type: 'context_summary',
-					tagName: 'compaction',
-					content: compaction.summary,
-					timestamp: new Date(compaction.timestamp).getTime(),
-				}),
-				compaction.timestamp,
-			),
-			sourceEntry: compaction,
-		},
-		...pathToContextEntries(path.slice(keptStart, latestCompactionIndex), options),
-		...pathToContextEntries(path.slice(latestCompactionIndex + 1), options),
-	];
+	return resolveContextSelection(
+		[
+			compaction,
+			...selectContextEntries(path.slice(keptStart, latestCompactionIndex)),
+			...selectContextEntries(path.slice(latestCompactionIndex + 1)),
+		],
+		options,
+	);
 }
 
 export function buildConversationContext(
@@ -1143,11 +1157,48 @@ export function buildConversationContext(
 	return buildConversationContextEntries(conversation, options).map((entry) => entry.message);
 }
 
-function pathToContextEntries(
-	path: ReducedEntry[],
+function resolveContextSelection(
+	selected: ReducedEntry[],
 	options: ConversationProjectionOptions,
 ): ReducedContextEntry[] {
-	const messages: ReducedContextEntry[] = [];
+	const answeredImageResults = new Set<string>();
+	let answered = false;
+	for (let index = selected.length - 1; index >= 0; index--) {
+		const entry = selected[index];
+		if (entry?.type !== 'message') continue;
+		if (entry.message.role === 'assistant') answered = true;
+		else if (answered && entry.toolImageRetention === 'turn') answeredImageResults.add(entry.id);
+	}
+	return selected.map((entry) => {
+		if (entry.type === 'compaction') {
+			return {
+				message: createUserContextMessage(
+					renderSignalMessage({
+						role: 'signal',
+						type: 'context_summary',
+						tagName: 'compaction',
+						content: entry.summary,
+						timestamp: new Date(entry.timestamp).getTime(),
+					}),
+					entry.timestamp,
+				),
+				sourceEntry: entry,
+			};
+		}
+		const message = resolveMessageAttachments(entry, options, answeredImageResults.has(entry.id));
+		return {
+			message:
+				message.role === 'signal'
+					? createUserContextMessage(renderSignalMessage(message), entry.timestamp)
+					: message,
+			sourceEntry: entry,
+		};
+	});
+}
+
+/** The message entries of one path segment that reach the model, in order. */
+function selectContextEntries(path: ReducedEntry[]): ReducedMessageEntry[] {
+	const selected: ReducedMessageEntry[] = [];
 	let index = 0;
 	while (index < path.length) {
 		const entry = path[index];
@@ -1155,15 +1206,7 @@ function pathToContextEntries(
 			index += 1;
 			continue;
 		}
-		const message = resolveMessageAttachments(entry, options);
-		if (message.role === 'signal') {
-			messages.push({
-				message: createUserContextMessage(renderSignalMessage(message), entry.timestamp),
-				sourceEntry: entry,
-			});
-			index += 1;
-			continue;
-		}
+		const message = entry.message;
 		if (message.role === 'assistant') {
 			if (message.stopReason === 'error' || message.stopReason === 'aborted') {
 				// Positional adjacency IS the recovery contract: the signal pair
@@ -1189,33 +1232,33 @@ function pathToContextEntries(
 			}
 			const toolCalls = message.content.filter((block) => block.type === 'toolCall');
 			if (toolCalls.length > 0) {
-				const results: ToolResultMessage[] = [];
+				const results: ReducedMessageEntry[] = [];
 				let resultIndex = index + 1;
 				while (resultIndex < path.length) {
 					const result = path[resultIndex];
 					if (result?.type !== 'message' || result.message.role !== 'toolResult') break;
-					results.push(resolveMessageAttachments(result, options) as ToolResultMessage);
+					results.push(result);
 					resultIndex += 1;
 				}
-				if (isCompleteToolBatch(toolCalls, results)) {
-					messages.push({ message, sourceEntry: entry });
-					for (let resultOffset = 0; resultOffset < results.length; resultOffset++) {
-						const resultEntry = path[index + 1 + resultOffset];
-						const result = results[resultOffset];
-						if (resultEntry && result) messages.push({ message: result, sourceEntry: resultEntry });
-					}
+				if (
+					isCompleteToolBatch(
+						toolCalls,
+						results.map((result) => result.message as ToolResultMessage),
+					)
+				) {
+					selected.push(entry, ...results);
 				}
 				index = resultIndex;
 				continue;
 			}
-			messages.push({ message, sourceEntry: entry });
+			selected.push(entry);
 			index += 1;
 			continue;
 		}
-		if (message.role !== 'toolResult') messages.push({ message, sourceEntry: entry });
+		if (message.role !== 'toolResult') selected.push(entry);
 		index += 1;
 	}
-	return messages;
+	return selected;
 }
 
 function appendEntry(
@@ -1494,6 +1537,7 @@ function toolResultMessage(
 function resolveMessageAttachments(
 	entry: ReducedMessageEntry,
 	options: ConversationProjectionOptions,
+	omitImages = false,
 ): AgentMessage {
 	const message = entry.message;
 	if (
@@ -1504,16 +1548,17 @@ function resolveMessageAttachments(
 	}
 	const attachments = [...(entry.attachmentRefs?.values() ?? [])];
 	let manifestProjected = false;
-	const content = message.content.map((block) => {
+	const content = message.content.flatMap((block): Array<TextContent | ImageContent> => {
 		if (block.type === 'text' && !manifestProjected && attachments.length > 0) {
 			manifestProjected = true;
-			return { ...block, text: attachmentManifest(block.text, attachments) };
+			return [{ ...block, text: attachmentManifest(block.text, attachments) }];
 		}
-		if (block.type !== 'image') return block;
+		if (block.type !== 'image') return [block];
 		const ref = entry.attachmentRefs?.get(block.data);
-		if (!ref) return block;
+		if (!ref) return [block];
+		if (omitImages) return [];
 		if (!options.resolveAttachment) throw new AttachmentNotAvailableError({ attachmentId: ref.id });
-		return { type: 'image' as const, ...options.resolveAttachment(ref) };
+		return [{ type: 'image' as const, ...options.resolveAttachment(ref) }];
 	});
 	if (!manifestProjected && attachments.length > 0) {
 		content.unshift({ type: 'text', text: attachmentManifest('', attachments) });

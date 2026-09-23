@@ -260,6 +260,13 @@ interface ToolOutcomeRecord extends ConversationRecordEnvelope {
 	 * live execution (task result adoption, resume failures, tool repair).
 	 */
 	durationMs?: number;
+	/**
+	 * Present only when the tool declared `imageRetention: 'turn'` and `content`
+	 * carries attachments: context projection omits those image blocks once an
+	 * assistant message follows the result. Absent means the images stay in
+	 * every later model request.
+	 */
+	imageRetention?: 'turn';
 }
 
 interface ToolResultsCommittedRecord extends ConversationRecordEnvelope {

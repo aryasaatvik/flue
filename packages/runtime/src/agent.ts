@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { type Static, Type } from '@earendil-works/pi-ai';
 import { composeTimeoutSignal } from './abort.ts';
 import { decodeBase64 } from './base64.ts';
+import type { AttachmentRef } from './conversation-records.ts';
 import type { PackagedSkillDirectory, Sandbox } from './types.ts';
 
 const MAX_READ_LINES = 2000;
@@ -12,6 +13,9 @@ const MAX_GLOB_RESULTS = 1000;
 const BASE64_READ_LINE_LENGTH = 76;
 const PACKAGED_SKILLS_ROOT = '/.flue/packaged-skills/';
 export const READ_SKILL_RESOURCE_TOOL_NAME = 'read_skill_resource';
+export const VIEW_ATTACHMENT_TOOL_NAME = 'view_attachment';
+/** Upper bound on images one `view_attachment` call loads. */
+export const MAX_VIEW_ATTACHMENT_IDS = 4;
 
 export interface TaskToolParams {
 	prompt: string;
@@ -409,6 +413,56 @@ export function createTaskTool(
 		async execute(toolCallId: string, params: Static<typeof TaskParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 			return runTask(params, signal, toolCallId);
+		},
+	};
+}
+
+/**
+ * Details of a successful `view_attachment` call: the refs of the loaded
+ * images, in the order of the result's image blocks. The tool outcome reuses
+ * these refs instead of storing the bytes again.
+ */
+export interface ViewAttachmentToolDetails {
+	attachments: AttachmentRef[];
+}
+
+const ViewAttachmentParams = Type.Object({
+	ids: Type.Array(
+		Type.String({
+			description: 'Attachment ID from an <attachments> manifest in this conversation',
+		}),
+		{ minItems: 1, maxItems: MAX_VIEW_ATTACHMENT_IDS },
+	),
+});
+
+/**
+ * Load images from this conversation's attachment manifests back into the
+ * model's view. Registered only while a tool declares
+ * `imageRetention: 'turn'`; its own results use the same retention, so a
+ * re-viewed image is visible for one model request.
+ */
+export function createViewAttachmentTool(
+	view: (
+		ids: string[],
+		signal?: AbortSignal,
+	) => Promise<AgentToolResult<ViewAttachmentToolDetails>>,
+): AgentTool<typeof ViewAttachmentParams> {
+	return {
+		name: VIEW_ATTACHMENT_TOOL_NAME,
+		label: 'View Attachment',
+		description:
+			'View images listed by ID in an <attachments> manifest in this conversation. ' +
+			'Images from some tools are shown only in the request right after the tool returns; ' +
+			`use this to look at one again. Pass 1-${MAX_VIEW_ATTACHMENT_IDS} IDs. ` +
+			'The images are shown for one request.',
+		parameters: ViewAttachmentParams,
+		async execute(
+			_toolCallId: string,
+			params: Static<typeof ViewAttachmentParams>,
+			signal?: AbortSignal,
+		) {
+			throwIfAborted(signal);
+			return view(params.ids, signal);
 		},
 	};
 }

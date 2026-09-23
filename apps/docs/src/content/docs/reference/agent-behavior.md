@@ -87,9 +87,10 @@ returns up to **1000** paths.
 Independent of any sandbox, the framework adds its own tools when the
 capability exists: `task` for [subagent delegation](/docs/guide/subagents/)
 (always present; inert until agents are declared), `activate_skill` when the
-agent has [skills](/docs/guide/skills/), and `read_skill_resource` when an
-imported skill packages resource files. These names are reserved — a custom
-tool can't take them.
+agent has [skills](/docs/guide/skills/), `read_skill_resource` when an
+imported skill packages resource files, and `view_attachment` when a tool
+declares `imageRetention: 'turn'`. These names are reserved — a custom tool
+can't take them.
 
 A sandbox adapter may replace the six sandbox tools with its own set — see
 [Sandbox-provided tools](/docs/guide/sandboxes/#sandbox-provided-tools) —

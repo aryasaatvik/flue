@@ -41,12 +41,16 @@ import {
 	createPackagedSkillReadTool,
 	createReadTool,
 	createTaskTool,
+	createViewAttachmentTool,
 	createWriteTool,
+	MAX_VIEW_ATTACHMENT_IDS,
 	overlayPackagedSkills,
 	READ_SKILL_RESOURCE_TOOL_NAME,
 	type TaskToolParams,
 	type TaskToolResultDetails,
 	type TaskToolUndeclaredAgentDetails,
+	VIEW_ATTACHMENT_TOOL_NAME,
+	type ViewAttachmentToolDetails,
 } from './agent.ts';
 import {
 	type AgentSubmission,
@@ -84,11 +88,11 @@ import {
 	toolStepRecordId,
 } from './conversation-records.ts';
 import {
-	buildConversationContext,
 	buildConversationContextEntries,
 	getActiveConversationPath,
 	type IndexedConversationRecord,
 	type InProgressAssistantMessage,
+	type ReducedContextEntry,
 	type ReducedConversationState,
 	toolOutcomeKey,
 	toolResultEntryId,
@@ -268,7 +272,15 @@ type ActiveToolCall = {
 	error?: unknown;
 	effectiveResult?: unknown;
 	effectiveResultCaptured?: boolean;
+	/** Image retention of the executing model tool, when turn-scoped. */
+	imageRetention?: TurnImageRetention;
 };
+/**
+ * Turn-scoped image retention of a wrapped model tool. `reusesAttachments`
+ * marks `view_attachment`, whose results carry already-stored attachment refs
+ * in `details.attachments` instead of new image bytes.
+ */
+type TurnImageRetention = { reusesAttachments: boolean };
 type PreparedToolExecution = {
 	args: unknown;
 	run: () => Promise<AgentToolResult<any>>;
@@ -741,6 +753,14 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private closePromise: Promise<void> | undefined;
 	private activeToolCalls = new Map<string, ActiveToolCall>();
 	private modelToolTelemetry = new WeakMap<AgentTool<any>, ToolTelemetry>();
+	/** Wrapped model tools whose result images are turn-scoped. */
+	private turnImageTools = new WeakMap<AgentTool<any>, TurnImageRetention>();
+	/**
+	 * Live tool-result messages that still carry raw turn-scoped images, by
+	 * canonical entry id → toolCallId. The turn boundary replaces each with its
+	 * canonical projection; a canonical rebuild clears the set.
+	 */
+	private liveTurnImageResults = new Map<string, string>();
 	private activeTurnId: string | undefined;
 	/** Per-turn request telemetry, set at `turn_request` and cleared at the turn's end. */
 	private modelRequests = new Map<string, { info: ModelRequestInfo; startedAt: number }>();
@@ -2260,9 +2280,12 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			// Render-per-turn (function agents): runs after the turn_end handler
 			// has committed the tool batch (state writes durable), so the next
 			// provider request gets fresh tool closures and a recomposed prompt.
-			...(options.rerender
-				? { prepareNextTurnWithContext: (turn) => this.prepareRerenderTurn(turn) }
-				: {}),
+			// Every session: turn-scoped tool images leave the live context
+			// once answered. Function agents also re-render here (runs after
+			// the turn_end handler has committed the tool batch, so state
+			// writes are durable) so the next provider request gets fresh
+			// tool closures and a recomposed prompt.
+			prepareNextTurnWithContext: (turn) => this.prepareNextTurn(turn),
 		});
 
 		this.eventCallback = options.onAgentEvent;
@@ -2565,7 +2588,22 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					const outcomeKey = `${encodeCanonicalId(assistantMessageId)}_${encodeCanonicalId(event.toolCallId)}`;
 					const messageId = `entry_tool_outcome_${outcomeKey}`;
 					const result = event.result as AgentToolResult<any>;
-					const outcomeContent = await this.persistToolResultContent(result, messageId);
+					const outcomeContent = await this.persistToolResultContent(
+						result,
+						messageId,
+						call.imageRetention?.reusesAttachments && !event.isError
+							? (result.details as ViewAttachmentToolDetails).attachments
+							: undefined,
+					);
+					const turnScopedImages =
+						call.imageRetention !== undefined &&
+						outcomeContent.some((block) => block.type === 'attachment');
+					if (turnScopedImages) {
+						this.liveTurnImageResults.set(
+							toolResultEntryId(assistantMessageId, event.toolCallId),
+							event.toolCallId,
+						);
+					}
 					const details = result.details as { output?: unknown } | undefined;
 					const hasStructuredOutput =
 						!event.isError &&
@@ -2591,6 +2629,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 							// reproduce the engine's batch-termination verdict.
 							...(result.terminate === true ? { terminate: true } : {}),
 							durationMs: toolDurationMs,
+							...(turnScopedImages ? { imageRetention: 'turn' as const } : {}),
 						},
 					]);
 					if (!call.startEmitted) {
@@ -2990,6 +3029,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				...(output !== undefined ? { output } : {}),
 				...(terminate ? { terminate: true } : {}),
 				durationMs: durationSince(startedAt),
+				...(toolDef.imageRetention === 'turn' &&
+				canonicalContent.some((block) => block.type === 'attachment')
+					? { imageRetention: 'turn' as const }
+					: {}),
 			};
 		};
 		const log = this.createToolLogger(toolDef.name, toolCallId);
@@ -3903,6 +3946,8 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					startEmitted: false,
 				};
 				call.telemetry = telemetry;
+				const imageRetention = this.turnImageTools.get(wrapped);
+				if (imageRetention) call.imageRetention = imageRetention;
 				this.activeToolCalls.set(toolCallId, call);
 				if (!call.startEmitted) {
 					this.emit(
@@ -4062,7 +4107,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					throw new Error('unreachable');
 				},
 			};
-			return this.wrapModelTool(tool, 'custom', (toolCallId, params, signal) => {
+			const wrapped = this.wrapModelTool(tool, 'custom', (toolCallId, params, signal) => {
 				// The merged signal carries the tool's declared deadline so the
 				// tool sees the expiry as its own `context.signal` aborting, and
 				// the race settles it with a ToolTimeoutError below.
@@ -4146,6 +4191,10 @@ export class Session implements FlueSession, AgentSubmissionSession {
 					result: (value) => (value.details as { output?: unknown }).output,
 				};
 			});
+			if (toolDef.imageRetention === 'turn') {
+				this.turnImageTools.set(wrapped, { reusesAttachments: false });
+			}
+			return wrapped;
 		});
 	}
 
@@ -4154,8 +4203,17 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		customDefinitions: ToolDefinition[],
 		extraTools: AgentTool<any>[],
 	): AgentTool<any>[] {
+		// `view_attachment` exists only while some tool's images are
+		// turn-scoped: with every image kept for the conversation there is
+		// nothing to re-view, and agents without such tools see no new tool.
+		const viewAttachmentTool = customDefinitions.some((tool) => tool.imageRetention === 'turn')
+			? createViewAttachmentTool((ids, signal) => this.viewAttachmentsForTool(ids, signal))
+			: undefined;
 		const groups: ModelToolGroup[] = [
 			...baseGroups,
+			...(viewAttachmentTool
+				? [{ source: 'framework' as const, tools: [viewAttachmentTool] }]
+				: []),
 			{ source: 'custom' as const, tools: this.createCustomTools(customDefinitions) },
 			{ source: 'result' as const, tools: extraTools },
 		];
@@ -4166,6 +4224,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 			READ_SKILL_RESOURCE_TOOL_NAME,
 			FINISH_TOOL_NAME,
 			GIVE_UP_TOOL_NAME,
+			...(viewAttachmentTool ? [VIEW_ATTACHMENT_TOOL_NAME] : []),
 		]);
 		for (const group of groups) {
 			for (const tool of group.tools) {
@@ -4207,9 +4266,52 @@ export class Session implements FlueSession, AgentSubmissionSession {
 									if (!prepared) throw new Error('[flue] Result tool has no registered preparer.');
 									return prepared;
 								})
-							: this.wrapModelTool(tool, group.source),
+							: this.wrapTurnImageTool(
+									this.wrapModelTool(tool, group.source),
+									tool === viewAttachmentTool,
+								),
 					),
 		);
+	}
+
+	private wrapTurnImageTool(wrapped: AgentTool<any>, viewAttachment: boolean): AgentTool<any> {
+		if (viewAttachment) this.turnImageTools.set(wrapped, { reusesAttachments: true });
+		return wrapped;
+	}
+
+	/**
+	 * `view_attachment`: load images visible in this conversation's
+	 * attachment manifests by id. The result reuses the stored refs, and the
+	 * tool's turn-scoped retention shows the images for one model request.
+	 */
+	private async viewAttachmentsForTool(
+		ids: readonly string[],
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ViewAttachmentToolDetails>> {
+		const unique = [...new Set(ids)];
+		if (unique.length === 0 || unique.length > MAX_VIEW_ATTACHMENT_IDS) {
+			throw new Error(
+				`[flue] view_attachment takes 1-${MAX_VIEW_ATTACHMENT_IDS} attachment ids; received ${unique.length}.`,
+			);
+		}
+		const available = this.visibleCanonicalAttachments(await this.requireConversation());
+		const attachments = unique.map((id) => {
+			const attachment = available.get(id);
+			if (!attachment) throw new AttachmentNotAvailableError({ attachmentId: id });
+			return attachment;
+		});
+		const images = await this.resolveCanonicalImages(unique);
+		if (signal?.aborted) throw abortErrorFor(signal);
+		return {
+			content: [
+				{
+					type: 'text',
+					text: `Showing ${attachments.map((attachment) => attachment.id).join(', ')}.`,
+				},
+				...images,
+			],
+			details: { attachments },
+		};
 	}
 
 	/** Build built-in tools from the sandbox adapter or the framework defaults. */
@@ -4745,14 +4847,24 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private async persistToolResultContent(
 		result: AgentToolResult<any>,
 		messageId: string,
+		storedRefs?: readonly import('./conversation-records.ts').AttachmentRef[],
 	): Promise<CanonicalToolResultContent[]> {
-		const refs = await this.persistCanonicalAttachments(
-			result.content.flatMap((content, index) =>
-				content.type === 'image'
-					? [{ id: `att_${messageId}_${index}`, mimeType: content.mimeType, data: content.data }]
-					: [],
-			),
+		const images = result.content.flatMap((content, index) =>
+			content.type === 'image'
+				? [{ id: `att_${messageId}_${index}`, mimeType: content.mimeType, data: content.data }]
+				: [],
 		);
+		// `storedRefs` name already-stored attachments whose bytes these image
+		// blocks carry (a `view_attachment` result): the outcome references
+		// them instead of storing the bytes again under new ids.
+		if (
+			storedRefs &&
+			(storedRefs.length !== images.length ||
+				storedRefs.some((ref, index) => ref.mimeType !== images[index]?.mimeType))
+		) {
+			throw new Error('[flue] Stored attachment refs do not match the tool result images.');
+		}
+		const refs = storedRefs ?? (await this.persistCanonicalAttachments(images));
 		let imageIndex = 0;
 		return result.content.map((content) => {
 			if (content.type === 'text') return { type: 'text' as const, text: content.text };
@@ -4842,11 +4954,23 @@ export class Session implements FlueSession, AgentSubmissionSession {
 		return conversation;
 	}
 
+	/**
+	 * Load the attachments the context projection inlines as image blocks.
+	 * Attachments it omits (turn-scoped tool images the model already
+	 * answered) are never read from the store.
+	 */
 	private async resolveCanonicalContextAttachments(
 		conversation: ReducedConversationState,
 	): Promise<Map<string, PromptImage>> {
+		const inlined = new Map<string, import('./conversation-records.ts').AttachmentRef>();
+		buildConversationContextEntries(conversation, {
+			resolveAttachment: (attachment) => {
+				inlined.set(attachment.id, attachment);
+				return { data: attachment.id, mimeType: attachment.mimeType };
+			},
+		});
 		const resolved = new Map<string, PromptImage>();
-		for (const attachment of this.visibleCanonicalAttachments(conversation).values()) {
+		for (const attachment of inlined.values()) {
 			const stored = await this.attachmentStore.get({
 				streamPath: this.conversationWriter.path,
 				conversationId: this.conversationId,
@@ -4865,15 +4989,126 @@ export class Session implements FlueSession, AgentSubmissionSession {
 	private async rebuildCanonicalContext(): Promise<void> {
 		const conversation = await this.requireConversation();
 		const resolved = await this.resolveCanonicalContextAttachments(conversation);
-		const messages = buildConversationContext(conversation, {
+		const entries = buildConversationContextEntries(conversation, {
 			resolveAttachment: (attachment) => {
 				const image = resolved.get(attachment.id);
 				if (!image) throw new AttachmentNotAvailableError({ attachmentId: attachment.id });
 				return image;
 			},
 		});
-		this.agentLoop.state.messages = messages;
+		this.agentLoop.state.messages = entries.map((entry) => entry.message);
+		this.trackLiveTurnImageResults(entries);
 		this.contextCompacted = getLatestConversationCompaction(conversation) !== undefined;
+	}
+
+	/**
+	 * Reset the live turn-scoped image index to the tool results a freshly
+	 * projected context still carries images for — the ones the next turn
+	 * boundary must strip once the model has answered them.
+	 */
+	private trackLiveTurnImageResults(entries: readonly ReducedContextEntry[]): void {
+		this.liveTurnImageResults.clear();
+		for (const { message, sourceEntry } of entries) {
+			if (
+				sourceEntry.type === 'message' &&
+				sourceEntry.toolImageRetention === 'turn' &&
+				message.role === 'toolResult' &&
+				message.content.some((block) => block.type === 'image')
+			) {
+				this.liveTurnImageResults.set(sourceEntry.id, message.toolCallId);
+			}
+		}
+	}
+
+	/**
+	 * Turn boundary for turn-scoped tool images. Every live tool result that
+	 * still carries raw turn-scoped images is replaced with its canonical
+	 * projection — the exact message `buildConversationContextEntries`
+	 * produces for its entry, manifest text included — so the live loop and a
+	 * rehydrated context never disagree. Results the latest assistant answered
+	 * project without images (and leave the index); results from the batch
+	 * just committed keep their images, resolved from the live message's own
+	 * bytes rather than the attachment store. Returns the replaced message
+	 * list, or undefined when nothing changed.
+	 */
+	private async projectLiveTurnImageResults(): Promise<AgentMessage[] | undefined> {
+		if (this.liveTurnImageResults.size === 0) return undefined;
+		const messages = this.agentLoop.state.messages.slice();
+		const liveImages = new Map<string, ImageContent[]>();
+		for (const [entryId, toolCallId] of this.liveTurnImageResults) {
+			const live = messages.findLast(
+				(message) => message.role === 'toolResult' && message.toolCallId === toolCallId,
+			) as ToolResultMessage | undefined;
+			if (!live) {
+				this.liveTurnImageResults.delete(entryId);
+				continue;
+			}
+			liveImages.set(
+				entryId,
+				live.content.filter((block): block is ImageContent => block.type === 'image'),
+			);
+		}
+		if (liveImages.size === 0) return undefined;
+		const conversation = await this.requireConversation();
+		// Canonical and live image blocks of one result pair by position.
+		const trackedAttachments = new Set<string>();
+		const liveImageByAttachment = new Map<string, ImageContent>();
+		for (const [entryId, images] of liveImages) {
+			const entry = conversation.entries.get(entryId);
+			if (entry?.type !== 'message' || entry.message.role !== 'toolResult') continue;
+			const refs = entry.message.content.filter((block) => block.type === 'image');
+			refs.forEach((ref, index) => {
+				trackedAttachments.add(ref.data);
+				const image = images[index];
+				if (image) liveImageByAttachment.set(ref.data, image);
+			});
+		}
+		// Only the tracked results' messages are used, so every other inlined
+		// attachment resolves to a placeholder instead of a store read.
+		const projected = buildConversationContextEntries(conversation, {
+			resolveAttachment: (attachment) => {
+				if (!trackedAttachments.has(attachment.id)) {
+					return { data: attachment.id, mimeType: attachment.mimeType };
+				}
+				const image = liveImageByAttachment.get(attachment.id);
+				if (!image) throw new AttachmentNotAvailableError({ attachmentId: attachment.id });
+				return { data: image.data, mimeType: image.mimeType };
+			},
+		});
+		let changed = false;
+		for (const entryId of liveImages.keys()) {
+			const toolCallId = this.liveTurnImageResults.get(entryId);
+			const replacement = projected.find((entry) => entry.sourceEntry.id === entryId)?.message;
+			const index = messages.findLastIndex(
+				(message) => message.role === 'toolResult' && message.toolCallId === toolCallId,
+			);
+			if (replacement?.role !== 'toolResult' || index === -1) {
+				this.liveTurnImageResults.delete(entryId);
+				continue;
+			}
+			messages[index] = replacement;
+			changed = true;
+			if (!replacement.content.some((block) => block.type === 'image')) {
+				this.liveTurnImageResults.delete(entryId);
+			}
+		}
+		if (!changed) return undefined;
+		this.agentLoop.state.messages = messages;
+		return messages;
+	}
+
+	/**
+	 * The loop's turn boundary: project turn-scoped tool images, then (for
+	 * function agents) re-render. The re-render snapshots the already
+	 * projected live messages, so both compose into one replacement context.
+	 */
+	private async prepareNextTurn(
+		turn: PrepareNextTurnContext,
+	): Promise<AgentLoopTurnUpdate | undefined> {
+		const projected = await this.projectLiveTurnImageResults();
+		if (this.rerender) return this.prepareRerenderTurn(turn);
+		if (!projected) return undefined;
+		return { context: { ...turn.context, messages: projected.slice() } };
 	}
 
 	// ─── Model-turn recovery and compaction ───────────────────────────────────

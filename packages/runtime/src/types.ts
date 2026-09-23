@@ -23,6 +23,7 @@ import type { ToolDefinition } from './tool-types.ts';
 export type {
 	ToolContext,
 	ToolDefinition,
+	ToolImageRetention,
 	ToolInput,
 	ToolInputSchema,
 	ToolOutput,
