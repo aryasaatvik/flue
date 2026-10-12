@@ -1,3 +1,4 @@
+import { normalizeContext, type TranscriptContext } from '@earendil-works/pi-ai';
 import { describe, expect, it } from 'vitest';
 import { cloudflareBindingProvider } from './workers-ai-provider.ts';
 
@@ -39,9 +40,15 @@ function anthropicSseResponse(): Response {
 
 function anthropicProviderFor(extra?: Partial<Parameters<typeof cloudflareBindingProvider>[0]>) {
 	let recorded: Record<string, unknown> | undefined;
+	let recordedOptions: { extraHeaders?: Record<string, string> } | undefined;
 	const binding = {
-		async run(_modelId: string, params: Record<string, unknown>) {
+		async run(
+			_modelId: string,
+			params: Record<string, unknown>,
+			runOptions?: { extraHeaders?: Record<string, string> },
+		) {
 			recorded = params;
+			recordedOptions = runOptions;
 			return anthropicSseResponse();
 		},
 	};
@@ -54,7 +61,12 @@ function anthropicProviderFor(extra?: Partial<Parameters<typeof cloudflareBindin
 		.getModels()
 		.find((candidate) => candidate.id === 'anthropic/claude-opus-5');
 	if (!model) throw new Error('Expected an anthropic gateway catalog model');
-	return { provider, model, recorded: () => recorded };
+	return {
+		provider,
+		model,
+		recorded: () => recorded,
+		recordedHeaders: () => recordedOptions?.extraHeaders,
+	};
 }
 
 function providerFor(chunks: unknown[]) {
@@ -94,7 +106,7 @@ describe('Cloudflare Workers AI assistant content', () => {
 			{ choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
 		]);
 
-		const result = await provider.streamSimple(model, { messages: [] }).result();
+		const result = await provider.streamSimple(model, normalizeContext({ messages: [] })).result();
 
 		expect(result.stopReason).toBe('toolUse');
 		expect(result.content).toEqual([
@@ -111,7 +123,7 @@ describe('Cloudflare Workers AI assistant content', () => {
 			{ choices: [{ delta: {}, finish_reason: 'stop' }] },
 		]);
 
-		const result = await provider.streamSimple(model, { messages: [] }).result();
+		const result = await provider.streamSimple(model, normalizeContext({ messages: [] })).result();
 
 		expect(result.stopReason).toBe('error');
 		expect(result.errorMessage).toContain(
@@ -126,11 +138,11 @@ describe('Cloudflare binding Anthropic gateway effort', () => {
 		const result = await provider
 			.stream(
 				model,
-				{
+				normalizeContext({
 					systemPrompt: 'x',
 					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
 					tools: [],
-				},
+				}),
 				{ reasoning: 'low' },
 			)
 			.result();
@@ -148,11 +160,11 @@ describe('Cloudflare binding Anthropic gateway effort', () => {
 		const result = await provider
 			.stream(
 				model,
-				{
+				normalizeContext({
 					systemPrompt: 'x',
 					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
 					tools: [],
-				},
+				}),
 				{ reasoning: 'xhigh' },
 			)
 			.result();
@@ -164,11 +176,14 @@ describe('Cloudflare binding Anthropic gateway effort', () => {
 	it('omits output_config when reasoning is not set', async () => {
 		const { provider, model, recorded } = anthropicProviderFor();
 		const result = await provider
-			.stream(model, {
-				systemPrompt: 'x',
-				messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
-				tools: [],
-			})
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'x',
+					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+					tools: [],
+				}),
+			)
 			.result();
 
 		expect(result.errorMessage).toBeUndefined();
@@ -182,11 +197,11 @@ describe('Cloudflare binding Anthropic prompt caching', () => {
 		await provider
 			.stream(
 				model,
-				{
+				normalizeContext({
 					systemPrompt: 'x',
 					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
 					tools: [],
-				},
+				}),
 				{ sessionId: 'session-1' },
 			)
 			.result();
@@ -198,16 +213,384 @@ describe('Cloudflare binding Anthropic prompt caching', () => {
 		await provider
 			.stream(
 				model,
-				{
+				normalizeContext({
 					systemPrompt: 'x',
 					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
 					tools: [],
-				},
+				}),
 				{ sessionId: 'session-1' },
 			)
 			.result();
 		const payload = JSON.stringify(recorded());
 		expect(payload).toContain('cache_control');
 		expect(payload).toContain('"type":"ephemeral"');
+	});
+});
+
+describe('Cloudflare binding Anthropic beta features', () => {
+	const lookupTool = {
+		name: 'lookup',
+		description: 'Look something up',
+		parameters: { type: 'object', properties: {} },
+	} as never;
+
+	it('sends betas as the anthropic-beta header, not in the request body', async () => {
+		const { provider, model, recorded, recordedHeaders } = anthropicProviderFor();
+		const result = await provider
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'x',
+					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+					tools: [lookupTool],
+				}),
+				{ sessionId: 'session-1' },
+			)
+			.result();
+
+		expect(result.errorMessage).toBeUndefined();
+		expect(recorded()).not.toHaveProperty('betas');
+		expect(recorded()?.tools).toHaveLength(1);
+		expect(recordedHeaders()).toMatchObject({
+			'anthropic-beta': 'fine-grained-tool-streaming-2025-05-14',
+			'x-session-affinity': 'session-1',
+		});
+	});
+
+	it('joins multiple betas with commas and replaces a configured header', async () => {
+		const { provider, model, recorded, recordedHeaders } = anthropicProviderFor();
+		await provider
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'x',
+					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+					tools: [],
+				}),
+				{ headers: { 'Anthropic-Beta': 'beta-a, beta-b', 'x-custom': '1' } },
+			)
+			.result();
+
+		expect(recorded()).not.toHaveProperty('betas');
+		const headers = recordedHeaders() ?? {};
+		expect(headers['anthropic-beta']).toBe('beta-a,beta-b');
+		expect(headers).not.toHaveProperty('Anthropic-Beta');
+		expect(headers['x-custom']).toBe('1');
+	});
+
+	it('an explicit empty betas list overrides a configured anthropic-beta header', async () => {
+		const { provider, model, recorded, recordedHeaders } = anthropicProviderFor();
+		await provider
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'x',
+					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+					tools: [],
+				}),
+				{
+					headers: { 'Anthropic-Beta': 'beta-a' },
+					onPayload: (payload) => ({ ...(payload as Record<string, unknown>), betas: [] }),
+				},
+			)
+			.result();
+
+		expect(recorded()).not.toHaveProperty('betas');
+		const headers = recordedHeaders() ?? {};
+		expect(headers).not.toHaveProperty('Anthropic-Beta');
+		expect(headers['anthropic-beta']).toBe('');
+		expect(JSON.stringify(headers)).not.toContain('beta-a');
+	});
+
+	it('sends no anthropic-beta header when no beta features apply', async () => {
+		const { provider, model, recorded, recordedHeaders } = anthropicProviderFor();
+		await provider
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'x',
+					messages: [{ role: 'user', content: 'hi', timestamp: 0 }],
+					tools: [],
+				}),
+			)
+			.result();
+
+		expect(recorded()).not.toHaveProperty('betas');
+		expect(recordedHeaders()?.['anthropic-beta']).toBeUndefined();
+	});
+});
+
+// ─── Behavioral probes: the transcript-adaptation behavior this PR changes ──
+
+function recordingProvider(chunks: unknown[]): {
+	provider: ReturnType<typeof cloudflareBindingProvider>;
+	recorded: () => Record<string, unknown> | undefined;
+} {
+	let recorded: Record<string, unknown> | undefined;
+	const binding = {
+		async run(_modelId: string, params: Record<string, unknown>) {
+			recorded = params;
+			return sseResponse(chunks);
+		},
+	};
+	const provider = cloudflareBindingProvider({ binding: binding as never, gateway: false });
+	return { provider, recorded: () => recorded };
+}
+
+/** Minimal valid OpenAI Responses SSE (message with one output_text part). */
+function responsesSseResponse(text = 'hi'): Response {
+	const events = [
+		{ type: 'response.created', response: { id: 'resp_1' } },
+		{
+			type: 'response.output_item.added',
+			output_index: 0,
+			item: { id: 'msg_1', type: 'message', role: 'assistant', status: 'in_progress', content: [] },
+		},
+		{
+			type: 'response.content_part.added',
+			item_id: 'msg_1',
+			output_index: 0,
+			content_index: 0,
+			part: { type: 'output_text', text: '' },
+		},
+		{
+			type: 'response.output_text.delta',
+			item_id: 'msg_1',
+			output_index: 0,
+			content_index: 0,
+			delta: text,
+		},
+		{
+			type: 'response.output_text.done',
+			item_id: 'msg_1',
+			output_index: 0,
+			content_index: 0,
+			text,
+		},
+		{
+			type: 'response.content_part.done',
+			item_id: 'msg_1',
+			output_index: 0,
+			content_index: 0,
+			part: { type: 'output_text', text },
+		},
+		{
+			type: 'response.output_item.done',
+			output_index: 0,
+			item: {
+				id: 'msg_1',
+				type: 'message',
+				role: 'assistant',
+				status: 'completed',
+				content: [{ type: 'output_text', text }],
+			},
+		},
+		{ type: 'response.completed', response: { id: 'resp_1', status: 'completed', output: [] } },
+	] as const;
+	const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+	return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+}
+
+const functionTool = (name: string) => ({
+	name,
+	label: name,
+	description: `Does ${name} things.`,
+	parameters: { type: 'object' as const, properties: {} },
+});
+
+const completionsModel = (compat?: Record<string, unknown>, reasoning = false) => ({
+	id: '@cf/test/model',
+	name: 'Test Model',
+	api: 'openai-completions' as const,
+	provider: 'cloudflare',
+	baseUrl: '',
+	reasoning,
+	input: ['text' as const],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 0,
+	maxTokens: 0,
+	compat,
+});
+
+describe('Cloudflare binding transcript adaptation', () => {
+	it('carries request-level tools and the system prompt on the chat-completions branch', async () => {
+		const { provider, recorded } = recordingProvider([
+			{ choices: [{ delta: { content: 'ok' } }] },
+			{ choices: [{ delta: {}, finish_reason: 'stop' }] },
+		]);
+		const result = await provider
+			.stream(
+				completionsModel(),
+				normalizeContext({
+					systemPrompt: 'System instructions.',
+					messages: [],
+					tools: [functionTool('lookup')],
+				}),
+			)
+			.result();
+		expect(result.errorMessage).toBeUndefined();
+		const payload = recorded();
+		expect(payload).toBeDefined();
+		const tools = (payload as Record<string, unknown>).tools as Array<{
+			function?: { name?: string; description?: string };
+		}>;
+		expect(tools.map((tool) => tool.function?.name)).toContain('lookup');
+		expect(tools[0]?.function?.description).toContain('Does lookup things.');
+		const messages = (payload as Record<string, unknown>).messages as Array<{
+			role?: string;
+			content?: unknown;
+		}>;
+		expect(messages[0]?.role).toBe('system');
+		expect(JSON.stringify(messages[0])).toContain('System instructions.');
+	});
+
+	it('merges per-model catalog compat overrides over the base Workers AI profile', async () => {
+		const { provider, recorded } = recordingProvider([
+			{ choices: [{ delta: { content: 'ok' } }] },
+			{ choices: [{ delta: {}, finish_reason: 'stop' }] },
+		]);
+		// `supportsDeveloperRole` is false in the hardcoded base profile; a
+		// catalog override must win and switch the instruction role.
+		await provider
+			.stream(
+				completionsModel({ supportsDeveloperRole: true, supportsReasoningEffort: true }, true),
+				normalizeContext({ systemPrompt: 'System instructions.', messages: [] }),
+			)
+			.result();
+		const messages = recorded()?.messages as Array<{ role?: string }>;
+		expect(messages[0]?.role).toBe('developer');
+	});
+
+	it('carries request-level tools and the system prompt on the Responses branch', async () => {
+		let recorded: Record<string, unknown> | undefined;
+		const binding = {
+			async run(_modelId: string, params: Record<string, unknown>) {
+				recorded = params;
+				return responsesSseResponse();
+			},
+		};
+		const provider = cloudflareBindingProvider({ binding: binding as never, gateway: false });
+		const model = {
+			id: 'openai/test-model',
+			name: 'Test Model',
+			api: 'openai-responses' as const,
+			provider: 'cloudflare',
+			baseUrl: '',
+			reasoning: false,
+			input: ['text' as const],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 0,
+			maxTokens: 0,
+		};
+		const result = await provider
+			.stream(
+				model,
+				normalizeContext({
+					systemPrompt: 'System instructions.',
+					messages: [],
+					tools: [functionTool('lookup')],
+				}),
+			)
+			.result();
+		expect(result.errorMessage).toBeUndefined();
+		const tools = recorded?.tools as Array<{ name?: string; description?: string }> | undefined;
+		expect(tools?.map((tool) => tool.name)).toContain('lookup');
+		expect(JSON.stringify(recorded?.input)).toContain('System instructions.');
+	});
+
+	it('renders mid-conversation tool additions as additional_tools on the Responses branch', async () => {
+		let recorded: Record<string, unknown> | undefined;
+		const binding = {
+			async run(_modelId: string, params: Record<string, unknown>) {
+				recorded = params;
+				return responsesSseResponse();
+			},
+		};
+		const provider = cloudflareBindingProvider({ binding: binding as never, gateway: false });
+		const model = {
+			id: 'openai/test-model',
+			name: 'Test Model',
+			api: 'openai-responses' as const,
+			provider: 'cloudflare',
+			baseUrl: '',
+			reasoning: false,
+			input: ['text' as const],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 0,
+			maxTokens: 0,
+			compat: {
+				supportsMidConvoSystemMessages: true,
+				supportsAdditionalTools: true,
+				supportsToolSearch: false,
+			},
+		};
+		// Tool `a` is declared in the leading system message; tool `b` is added
+		// mid-conversation by a later system message — the deferred-loading
+		// channel (`additional_tools`) is the model's own, so `b` must not be
+		// in the request-level tools and must appear as an anchored item.
+		// `normalizeContext` cannot produce a mid-conversation `toolsAdded`
+		// message, so the transcript is built by hand.
+		const transcript = {
+			messages: [
+				{
+					role: 'system' as const,
+					content: 'System instructions.',
+					toolsAdded: [functionTool('a')],
+					timestamp: 0,
+				},
+				{
+					role: 'system' as const,
+					content: 'New tool.',
+					toolsAdded: [functionTool('b')],
+					timestamp: 1,
+				},
+				{ role: 'user' as const, content: 'hi', timestamp: 2 },
+			],
+		} as TranscriptContext;
+		await provider.stream(model, transcript).result();
+		const tools = (recorded?.tools ?? []) as Array<{ name?: string }>;
+		expect(tools.map((tool) => tool.name)).toEqual(['a']);
+		expect(JSON.stringify(recorded?.input)).toContain('"type":"additional_tools"');
+		expect(JSON.stringify(recorded?.input)).toContain('"b"');
+	});
+
+	it('maps the thinking level into the Responses reasoning field', async () => {
+		let recorded: Record<string, unknown> | undefined;
+		const binding = {
+			async run(_modelId: string, params: Record<string, unknown>) {
+				recorded = params;
+				return responsesSseResponse();
+			},
+		};
+		const provider = cloudflareBindingProvider({ binding: binding as never, gateway: false });
+		const model = {
+			id: 'openai/test-model',
+			name: 'Test Model',
+			api: 'openai-responses' as const,
+			provider: 'cloudflare',
+			baseUrl: '',
+			reasoning: true,
+			input: ['text' as const],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 0,
+			maxTokens: 0,
+			thinkingLevelMap: { low: 'low', medium: 'medium', high: 'high' },
+		};
+		await provider
+			.streamSimple(model, normalizeContext({ messages: [] }), { reasoning: 'high' })
+			.result();
+		expect(recorded?.reasoning).toEqual({ effort: 'high', summary: 'auto' });
+	});
+});
+
+describe('Cloudflare binding gateway catalog', () => {
+	it('hydrates GPT-6.1 Sol with catalog metadata instead of the zero-metadata fallback', () => {
+		const provider = cloudflareBindingProvider({ binding: {} as never, gateway: false });
+		const model = provider.getModels().find((candidate) => candidate.id === 'openai/gpt-6.1-sol');
+		expect(model).toBeDefined();
+		expect(model?.api).toBe('openai-responses');
+		expect(model?.reasoning).toBe(true);
+		expect(model?.input).toEqual(['text', 'image']);
+		expect(model?.contextWindow).toBeGreaterThan(0);
 	});
 });

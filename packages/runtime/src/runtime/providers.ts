@@ -7,6 +7,7 @@ import {
 	type MutableModels,
 	type Provider,
 } from '@earendil-works/pi-ai';
+import { canonicalProviderId } from '../provider-id-aliases.ts';
 
 // ─── Models instance ────────────────────────────────────────────────────────
 
@@ -29,7 +30,57 @@ let models: MutableModels = createModels();
  * takes precedence over the generated Workers AI binding default.
  */
 export function setProvider(provider: Provider): void {
-	models.setProvider(provider);
+	models.setProvider(
+		provider.id === CLOUDFLARE_AI_GATEWAY_PROVIDER_ID
+			? withAnthropicGatewayModelIds(provider)
+			: provider,
+	);
+}
+
+// ─── Cloudflare AI Gateway Anthropic ids ──────────────────────────────────────
+
+const CLOUDFLARE_AI_GATEWAY_PROVIDER_ID = 'cloudflare-ai-gateway';
+
+/**
+ * Whether a model is served by AI Gateway's native Anthropic endpoint
+ * (`…/{CLOUDFLARE_GATEWAY_ID}/anthropic`), which forwards the model id to
+ * Anthropic's Messages API unchanged.
+ */
+export function isAnthropicGatewayModel(model: Pick<Model<Api>, 'api' | 'baseUrl'>): boolean {
+	return model.api === 'anthropic-messages' && /\/anthropic\/?$/.test(model.baseUrl);
+}
+
+/**
+ * The Anthropic API id for a gateway catalog id: dotted versions become
+ * dashed (`claude-sonnet-4.6` → `claude-sonnet-4-6`). Anthropic only accepts
+ * dashed ids and answers dotted ones with a 404.
+ */
+export function anthropicGatewayModelId(modelId: string): string {
+	return modelId.replace(/(?<=\d)\.(?=\d)/g, '-');
+}
+
+/**
+ * Rewrite a gateway provider's Anthropic catalog ids to the ids Anthropic
+ * accepts. Since pi-ai 0.84.3 the `cloudflare-ai-gateway` catalog lists
+ * dotted Claude ids (`claude-sonnet-4.6`), and pi sends `model.id` to the
+ * native Anthropic endpoint verbatim, so every dotted model 404s. Dashed
+ * specifiers resolve directly; dotted specifiers still resolve through the
+ * version-separator alias in {@link resolveModel}. Already-dashed ids pass
+ * through, so this is a no-op once pi's catalog is fixed.
+ */
+function withAnthropicGatewayModelIds(provider: Provider): Provider {
+	return {
+		...provider,
+		getModels: () => {
+			const seen = new Set<string>();
+			return provider.getModels().flatMap((model) => {
+				const id = isAnthropicGatewayModel(model) ? anthropicGatewayModelId(model.id) : model.id;
+				if (seen.has(id)) return [];
+				seen.add(id);
+				return [id === model.id ? model : { ...model, id }];
+			});
+		},
+	};
 }
 
 /** Whether a provider ID has already been registered. */
@@ -51,7 +102,7 @@ export function resetModelsForTests(): void {
  * Register a built-in provider from its
  * `@earendil-works/pi-ai/providers/<id>` module namespace. Generated entries
  * call this: picking the factory out of the namespace keeps pi's exact export
- * names (`anthropicProvider`, `azureOpenAIResponsesProvider`, …) out of
+ * names (`anthropicProvider`, `azureProvider`, ...) out of
  * generated code, so pi's naming can't drift out from under it. Skips IDs
  * that are already registered so `app.ts` overrides win regardless of module
  * evaluation order.
@@ -91,7 +142,7 @@ export function providerTelemetryName(providerId: string): string {
 		{
 			'amazon-bedrock': 'aws.bedrock',
 			anthropic: 'anthropic',
-			'azure-openai-responses': 'azure.ai.openai',
+			azure: 'azure.ai.openai',
 			deepseek: 'deepseek',
 			google: 'gcp.gemini',
 			'google-vertex': 'gcp.vertex_ai',
@@ -157,6 +208,25 @@ export function resetDynamicModelWarnForTests(): void {
 	warnedAboutDynamicModelSynthesis = false;
 }
 
+/** One warning per requested provider ID: the renamed-away alias was used. */
+const warnedProviderIdAliases = new Set<string>();
+
+/** Reset the provider-ID alias warning guard. Test-only. */
+export function resetProviderIdAliasWarnForTests(): void {
+	warnedProviderIdAliases.clear();
+}
+
+/** Warn once that a model specifier used a provider ID pi has renamed. */
+function warnProviderIdAlias(requested: string, canonical: string): void {
+	if (warnedProviderIdAliases.has(requested)) return;
+	warnedProviderIdAliases.add(requested);
+	console.warn(
+		`[flue] Provider "${requested}" is deprecated; Pi renamed it to "${canonical}". ` +
+			`Update the specifier to "${canonical}/...". The old ID still resolves for now ` +
+			`and will be removed in a future major release.`,
+	);
+}
+
 /**
  * Zero-metadata Model literal for ids no catalog knows. Carries the
  * {@link DYNAMIC_MODEL_MARKER} so consumers can tell "free" (real zero-cost
@@ -200,8 +270,12 @@ export function resolveModel(model: string): Model<Api> {
 				`Use the "provider-id/model-id" format (e.g. "anthropic/claude-haiku-4-5").`,
 		);
 	}
-	const providerId = modelSpecifier.slice(0, slash);
+	const requestedProviderId = modelSpecifier.slice(0, slash);
+	const providerId = canonicalProviderId(requestedProviderId);
 	const modelId = modelSpecifier.slice(slash + 1);
+	if (providerId !== requestedProviderId) {
+		warnProviderIdAlias(requestedProviderId, providerId);
+	}
 
 	const provider = models.getProvider(providerId);
 	if (!provider) {
@@ -229,6 +303,9 @@ export function resolveModel(model: string): Model<Api> {
 	const resolved = models.getModel(providerId, modelId);
 	if (resolved) return resolved;
 
+	const aliased = resolveVersionSeparatorAlias(providerId, modelId);
+	if (aliased) return aliased;
+
 	const template = (provider as ProviderWithDynamicModels)[DYNAMIC_MODEL_TEMPLATE];
 	if (template) {
 		warnDynamicModelSynthesis(providerId, modelId);
@@ -239,6 +316,58 @@ export function resolveModel(model: string): Model<Api> {
 		`[flue] Unknown model ID "${modelId}" for provider "${providerId}". ` +
 			`Declared model IDs: ${listModelIds(providerId)}.`,
 	);
+}
+
+// ─── Version-separator aliases ──────────────────────────────────────────────
+
+/**
+ * Canonical form of a model ID for version-separator matching: a `-` or `.`
+ * between two digits becomes `.`, so `claude-sonnet-4-6` and
+ * `claude-sonnet-4.6` compare equal.
+ */
+function versionSeparatorKey(modelId: string): string {
+	return modelId.replace(/(?<=\d)[-.](?=\d)/g, '.');
+}
+
+/** One warning per requested specifier: the alias fallback was used. */
+const warnedVersionSeparatorAliases = new Set<string>();
+
+/** Reset the version-separator alias warning guard. Test-only. */
+export function resetVersionSeparatorAliasWarnForTests(): void {
+	warnedVersionSeparatorAliases.clear();
+}
+
+/**
+ * Resolve an undeclared model ID that differs from exactly one declared ID
+ * only in its version separators (`-` vs `.` between digits).
+ *
+ * pi-ai catalogs occasionally rename IDs between these forms (pi 0.84.3 moved
+ * the `cloudflare-ai-gateway` Claude models from `claude-sonnet-4-6` to
+ * `claude-sonnet-4.6`), and Cloudflare's binding catalog names models with
+ * dots where Anthropic uses dashes. Without this, a renamed ID becomes a hard
+ * `Unknown model ID` failure for every existing specifier. Ambiguous matches
+ * resolve to nothing so the regular error still reports them.
+ */
+function resolveVersionSeparatorAlias(providerId: string, modelId: string): Model<Api> | undefined {
+	if (!/\d[-.]\d/.test(modelId)) return undefined;
+	const key = versionSeparatorKey(modelId);
+
+	const candidates = models
+		.getModels(providerId)
+		.filter((model) => model.id !== modelId && versionSeparatorKey(model.id) === key);
+	if (candidates.length !== 1) return undefined;
+
+	const [model] = candidates as [Model<Api>];
+	const requested = `${providerId}/${modelId}`;
+	if (!warnedVersionSeparatorAliases.has(requested)) {
+		warnedVersionSeparatorAliases.add(requested);
+		console.warn(
+			`[flue] Model "${requested}" is not in the provider's catalog; using ` +
+				`"${providerId}/${model.id}", which differs only in version separators. ` +
+				`Update the specifier to "${providerId}/${model.id}".`,
+		);
+	}
+	return model;
 }
 
 function listModelIds(providerId: string): string {

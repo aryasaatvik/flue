@@ -1,5 +1,49 @@
 # @flue/runtime
 
+## 2.2.2
+
+### Patch Changes
+
+- 2cb57be: Fix Claude models on the `cloudflare-ai-gateway` provider failing with `404 not_found_error: model: claude-sonnet-4.6 was not found`. Since Pi 0.84.3 the gateway catalog lists Claude models with dotted versions (`claude-sonnet-4.6`), but the gateway's native Anthropic endpoint forwards the model ID to Anthropic, which only accepts dashed IDs. Flue now registers these models under Anthropic's IDs (`cloudflare-ai-gateway/claude-sonnet-4-6`); dotted specifiers still resolve to them. The `cloudflare` binding provider, which uses Cloudflare's dotted catalog names, is unchanged.
+
+## 2.2.1
+
+### Patch Changes
+
+- 548937e: Fix model specifiers that stopped resolving after the Pi 0.87.1 upgrade. Pi renamed the `cloudflare-ai-gateway` Claude model IDs from dashed versions to dotted versions (`claude-sonnet-4-6` → `claude-sonnet-4.6`), so existing specifiers such as `cloudflare-ai-gateway/claude-sonnet-4-6` failed with `Unknown model ID`. When a model ID isn't in the catalog but matches exactly one catalog ID that differs only in `-` versus `.` between version digits, Flue now resolves to that model and logs a one-time warning suggesting the current ID.
+
+## 2.2.0
+
+### Minor Changes
+
+- 54cabb7: Add bounded conversation history reads so long-running chats no longer transfer the whole transcript on every page load or reconnect.
+
+  - `client.history({ limit })` reads only the newest messages. The snapshot keeps the head `offset`, the `incarnation`, and every settlement, and adds a `before` cursor.
+  - `client.historyBefore(cursor, { limit })` reads older messages one page at a time. The page size is required.
+  - `client.observe({ limit })` hydrates only the newest messages, then grows forward with live updates. Rehydration after a reconnect reads from the window's oldest message, so no gap opens. The runtime cuts `conversation-reset` snapshots to the same window. The observed state's `before` cursor feeds `historyBefore()`, and a changed cursor means the window re-based.
+  - A window never cuts out a message that can still receive live updates, such as a response still streaming above messages delivered after it. It may hold more than `limit` messages.
+  - Cursors are opaque and bound to one stream generation. After the stream is reset and regrown, reads with an old cursor are rejected with `history_cursor_not_found` (410), even when message ids repeat, and `observe()` re-bases.
+  - `readSubmissionReply()` now requires `settlements`, so history pages are not accepted. It falls back to the latest assistant message only on a complete conversation, never on a bounded window where that message may belong to another submission.
+
+  Unbounded reads are unchanged. `@flue/react` still observes the whole conversation.
+
+- 2663e50: Support document attachments (PDFs) on user messages. `DeliveredAttachment` is now a union of image and document attachments — `{ type: 'document', data, mimeType: 'application/pdf', filename? }` — accepted on `dispatch()`, the `init()` handle, and direct HTTP prompts. `session.prompt()`, `skill()`, and `task()` gain a `documents` option alongside `images`, and `@flue/react`'s `sendMessage()` gains a `documents` option. Documents are forwarded to the model as native document content: Anthropic `document` blocks, OpenAI (and Azure OpenAI) Responses `input_file` parts, and Google `inlineData`. On other model APIs the document is replaced in model context with a text placeholder saying it was omitted. Documents are stored like images — as canonical attachments projected as `file` parts with `mediaType: 'application/pdf'` — so existing conversations and persistence adapters need no migration. The SDK also exports `DeliveredImageAttachment` and `DeliveredDocumentAttachment`.
+- 3b1adfd: Conversation messages now carry a server-authored `timestamp` (ISO 8601 capture time of the underlying durable record) in `history()`, `observe()`, and `useFlueAgent`. It works for every role and for existing conversations. `metadata` remains entirely agent-authored. Conversation settlements carry the same `timestamp` for when the submission settled.
+
+### Patch Changes
+
+- 43d15d1: Fix Cloudflare-routed Anthropic models (`cloudflare/anthropic/*`) failing with `betas: Extra inputs are not permitted` whenever the agent had tools. Anthropic beta features are now sent in the `anthropic-beta` request header instead of the request body.
+- 89032c5: Adds support for GPT-6 Sol, GPT-6 Luna, and Claude Opus 5.5. Flue now uses Pi 0.87.1, so you can pass these models to `useModel()` without extra configuration. The model list at `https://flueframework.com/models.json` also includes them now. There are no public API changes.
+
+## 2.1.1
+
+### Patch Changes
+
+- c5a2a72: Clarify that a skill's `allowed-tools` field is guidance. Flue accepts it for Agent Skills spec compatibility and does not enforce it; enforce authorization in your own tools and approval gates.
+- 756db76: Make trace content truncation scale linearly for long message arrays. Large traced conversations no longer repeatedly serialize the remaining history while fitting `gen_ai.input.messages` to the attribute budget, avoiding request latency and Cloudflare Durable Object CPU-limit resets.
+- d9e2ac0: Record tool arguments and results of every payload shape on the standard `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` attributes, so OTel backends can display them. The shape-based diversion to the vendor `flue.tool.call.*` fallback keys is removed — those keys are no longer emitted, and their constants are retained for source compatibility. Payloads record exactly as before: objects/arrays as JSON strings, strings byte-for-byte within the content budget, other scalars as their JSON form.
+- 7841ff8: Allow Flue packages and newly scaffolded applications to share a compatible Hono installation. Hono dependencies now use `^4.12.32`, preventing fresh projects from installing a newer root Hono alongside the runtime's older exact version and failing typecheck.
+
 ## 2.1.0
 
 ### Minor Changes

@@ -1,7 +1,7 @@
 ---
 title: Provider API
 description: Reference for the providers config, setProvider(), model resolution, and the Cloudflare AI binding provider in @flue/runtime.
-lastReviewedAt: 2026-07-21
+lastReviewedAt: 2026-10-09
 ---
 
 Flue's model layer is [Pi](https://pi.dev/docs/latest/providers)'s provider protocol, unwrapped: a provider is a Pi `Provider` object, and the runtime holds one Pi `Models` registry that every model call resolves against. Flue adds three things — a build-time [`providers` config](#the-providers-config) that selects which built-ins ship, [`setProvider()`](#setprovider) to register providers at runtime, and [`cloudflareBindingProvider()`](#cloudflarebindingprovider) for Workers AI dispatch through `env.AI`. Everything else — provider objects, auth resolution, custom endpoints — is Pi's own API, used directly. For a walkthrough, see [Models — Custom providers](/docs/guide/models/#custom-providers); this page is the complete contract.
@@ -34,6 +34,7 @@ Selects which providers the generated server entry registers, by provider ID. Ea
 - **Omitted: every built-in registers**, the Workers AI binding provider included on the Cloudflare target. The default preserves zero-config resolution — any `'provider/model-id'` specifier from Pi's catalog works, with credentials from the provider's environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...).
 - **Set: the list is exhaustive.** A specifier naming an unlisted provider fails at [model resolution](#model-resolution), and on the Cloudflare target the binding provider is registered only when the list names `'cloudflare'`. Naming `'cloudflare'` on the Node target is a config error (the binding only exists on Workers). Custom providers are unaffected — register those with [`setProvider()`](#setprovider).
 - **An unknown ID fails the build.** The generated import `@earendil-works/pi-ai/providers/<id>` does not resolve, and the build error names it.
+- **The `azure-openai-responses` provider ID is deprecated.** Pi 1.0.3 renamed Azure's provider to `azure`. Flue still accepts the old ID in the list and in model specifiers, registering the `azure` provider and warning once, but it will be removed in a future major release. Use `azure`.
 - **User registrations win.** The generated registrations skip any provider ID already registered, so a `setProvider()` in `app.ts` overrides a listed built-in regardless of module evaluation order.
 - **[`flue run`](/docs/cli/run/) ignores the list.** It loads only the agent module — no `app.ts`, no generated entry — and always registers the full built-in set. The narrowing is a server-build concern.
 
@@ -154,7 +155,7 @@ The minimal structural shape of a Workers AI binding, exported from `@flue/runti
 | Provider ID                   | `providerName`    |
 | ----------------------------- | ----------------- |
 | `amazon-bedrock`              | `aws.bedrock`     |
-| `azure-openai-responses`      | `azure.ai.openai` |
+| `azure`                       | `azure.ai.openai` |
 | `google`                      | `gcp.gemini`      |
 | `google-vertex`               | `gcp.vertex_ai`   |
 | `mistral`                     | `mistral_ai`      |

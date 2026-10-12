@@ -2,11 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-	type Context,
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxText,
 	fauxToolCall,
+	getCurrentTools,
+	type JsonObject,
+	type TranscriptContext,
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PersistenceAdapter } from './agent-execution-store.ts';
@@ -41,19 +43,19 @@ function screenshotAgent(imageRetention?: ToolImageRetention) {
 	};
 }
 
-type Captured = { messages: Context['messages']; tools: string[] };
+type Captured = { messages: TranscriptContext['messages']; tools: string[] };
 
 function capture(into: Captured[], reply: ReturnType<typeof fauxAssistantMessage>) {
-	return (context: Context) => {
+	return (context: TranscriptContext) => {
 		into.push({
 			messages: structuredClone(context.messages),
-			tools: (context.tools ?? []).map((tool) => tool.name),
+			tools: getCurrentTools(context.messages).map((tool) => tool.name),
 		});
 		return reply;
 	};
 }
 
-const call = (name: string, args: Record<string, unknown> = {}, id = `call_${name}`) =>
+const call = (name: string, args: JsonObject = {}, id = `call_${name}`) =>
 	fauxAssistantMessage([fauxToolCall(name, args, { id })], { stopReason: 'toolUse' });
 const done = (text: string) => fauxAssistantMessage([fauxText(text)], { stopReason: 'stop' });
 
@@ -78,7 +80,7 @@ function manifestId(captured: Captured, toolCallId: string): string {
 }
 
 /** The model-facing shape of a context: what a provider serializes. */
-function modelFacing(messages: Context['messages']) {
+function modelFacing(messages: TranscriptContext['messages']) {
 	return messages.map((message) =>
 		message.role === 'toolResult'
 			? { role: message.role, toolCallId: message.toolCallId, content: message.content }

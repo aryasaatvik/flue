@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as v from 'valibot';
+import { canonicalProviderId } from './provider-id-aliases.ts';
 
 // ─── Authoring API ──────────────────────────────────────────────────────────
 
@@ -368,7 +369,7 @@ export function resolveFlueProject(opts: ResolveFlueProjectOptions): ResolvedFlu
 		db: resolveEntry('db', config.db, baseDir, sourceRoot),
 		cloudflare: resolveEntry('cloudflare', config.cloudflare, baseDir, sourceRoot),
 		agents: config.agents,
-		providers: config.providers,
+		providers: config.providers?.map(canonicalProviderId),
 		tracing: config.tracing,
 	};
 }

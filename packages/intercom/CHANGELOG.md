@@ -1,5 +1,34 @@
 # @flue/intercom
 
+## 2.2.2
+
+### Patch Changes
+
+- Updated dependencies [2cb57be]
+  - @flue/runtime@2.2.2
+
+## 2.2.1
+
+### Patch Changes
+
+- Updated dependencies [548937e]
+  - @flue/runtime@2.2.1
+
+## 2.2.0
+
+### Patch Changes
+
+- Updated dependencies [54cabb7, 43d15d1, 2663e50, 3b1adfd, 89032c5]
+  - @flue/runtime@2.2.0
+
+## 2.1.1
+
+### Patch Changes
+
+- 7841ff8: Allow Flue packages and newly scaffolded applications to share a compatible Hono installation. Hono dependencies now use `^4.12.32`, preventing fresh projects from installing a newer root Hono alongside the runtime's older exact version and failing typecheck.
+- Updated dependencies [c5a2a72, 756db76, d9e2ac0, 7841ff8]
+  - @flue/runtime@2.1.1
+
 ## 2.1.0
 
 ### Patch Changes
